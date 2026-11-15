@@ -59,14 +59,17 @@ def test_format_terminal_window_strips_html_and_limits_lines():
         "● Read: <code>test_watcher.py</code>",
         "● Read: <code>test_watcher.py</code>",
         "● Created: <code>test_watcher.py</code>",
+        "● Ran: <code>cat < in.txt > out.txt</code>",
         "● Ran: <code>pytest tests/</code>",
     ])
-    formatted = format_terminal_window(raw, max_lines=5)
+    formatted = format_terminal_window(raw, max_lines=6)
     # Verify no raw HTML tags leaked
     assert "<code>" not in formatted
     assert "</code>" not in formatted
     assert "<i>" not in formatted
     assert "</i>" not in formatted
+    # Verify valid programming and shell syntax with < > is preserved
+    assert "cat < in.txt > out.txt" in formatted
     # Verify collapsing
     assert "Read: telegram_bot.py (x3)" in formatted
     # Verify windowing

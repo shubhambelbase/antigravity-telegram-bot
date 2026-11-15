@@ -59,8 +59,8 @@ def format_terminal_window(raw: str, max_chars: int = 2800, max_lines: int = 8) 
     - Limits visible window to the most recent max_lines with a clear folding badge.
     """
     clean = strip_ansi(raw).replace("\r\n", "\n").replace("\r", "\n")
-    # Strip HTML tags like <code>, </code>, <i>, </i> so they never leak into the bash box
-    clean = re.sub(r"<[^>]+>", "", clean)
+    # Strip HTML markup tags (e.g. <code>, </i>) without destroying code generics like vector<int> or redirects
+    clean = re.sub(r"</?(?:code|b|strong|em|pre|a|i)\b[^>]*>", "", clean)
     # Unescape html entities so code block displays natural symbols
     clean = html.unescape(clean)
 

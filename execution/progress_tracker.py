@@ -84,7 +84,7 @@ class AdaptiveProgressTracker:
 
     def _add_activity(self, text: str):
         """Adds a clean distinct activity to the current activity list, stripping any raw markup."""
-        clean = re.sub(r"<[^>]+>", "", text).strip()
+        clean = re.sub(r"</?(?:code|b|strong|em|pre|a|i)\b[^>]*>", "", text).strip()
         if not clean:
             return
         # Avoid immediate duplicate
@@ -200,8 +200,8 @@ class AdaptiveProgressTracker:
 
     def feed_line(self, line: str):
         """Parses a terminal or activity output line and updates progress states automatically."""
-        # Strip HTML tags so patterns match clean text regardless of markup
-        clean = re.sub(r"<[^>]+>", "", line).strip()
+        # Strip HTML tags so patterns match clean text without stripping code constructs like vector<int>
+        clean = re.sub(r"</?(?:code|b|strong|em|pre|a|i)\b[^>]*>", "", line).strip()
         if not clean:
             return
 
