@@ -148,7 +148,7 @@ echo [*] Running automated self-tests to verify system compatibility...
 if errorlevel 1 (
     echo [WARNING] Some self-tests produced warnings. Check tests/ for details.
 ) else (
-    echo [OK] All 46 automated unit tests passed with 100%% success!
+    echo [OK] All 46 automated unit tests passed with 100%% success.
 )
 echo.
 
@@ -167,7 +167,7 @@ if not exist ".env" (
     set /p "USER_TOKEN=Enter your Telegram Bot Token now (or press Enter to skip): "
     if defined USER_TOKEN (
         powershell -Command "(Get-Content .env) -replace 'TELEGRAM_BOT_TOKEN=.*', ('TELEGRAM_BOT_TOKEN=' + $env:USER_TOKEN) | Set-Content .env"
-        echo [OK] Bot Token saved to .env!
+        echo [OK] Bot Token saved to .env.
     ) else (
         echo [!] Remember to open .env and paste your TELEGRAM_BOT_TOKEN before launching.
     )
@@ -182,7 +182,7 @@ REM ----------------------------------------------------
 where agy >nul 2>&1
 if errorlevel 1 (
     if not exist "%LOCALAPPDATA%\agy\bin\agy.exe" (
-        echo [!] Google Antigravity CLI ('agy') was not found in standard PATH.
+        echo [!] Google Antigravity CLI 'agy' was not found in standard PATH.
         echo     Install it from https://antigravity.google or npm install -g @google/antigravity
     ) else (
         echo [OK] Antigravity CLI detected at %LOCALAPPDATA%\agy\bin\agy.exe
