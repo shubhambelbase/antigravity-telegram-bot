@@ -1,7 +1,7 @@
 @echo off
 setlocal
 title Antigravity Telegram Bot
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 echo ====================================================
 echo   Antigravity Telegram Bot Remote Control
@@ -12,7 +12,7 @@ REM If virtual environment does not exist, trigger installer
 if not exist ".venv\Scripts\python.exe" (
     echo [!] First time setup required. Launching installer...
     echo.
-    call "%~dp0setup\install.bat"
+    call "%~dp0install.bat"
     if not exist ".venv\Scripts\python.exe" (
         echo [ERROR] Installation was not completed. Exiting.
         pause

@@ -37,7 +37,9 @@ def enable_autostart(
 ) -> bool:
     """Creates a Windows shortcut in the Startup folder to run start_bot_silent.vbs on login."""
     root = os.path.abspath(project_dir or os.path.dirname(os.path.dirname(__file__)))
-    target_vbs = os.path.join(root, "start_bot_silent.vbs")
+    target_vbs = os.path.join(root, "setup", "start_bot_silent.vbs")
+    if not os.path.isfile(target_vbs):
+        target_vbs = os.path.join(root, "start_bot_silent.vbs")
     sc_dest = shortcut_path or get_startup_shortcut_path()
 
     if not os.path.isfile(target_vbs):

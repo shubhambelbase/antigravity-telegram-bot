@@ -22,10 +22,11 @@ def test_autostart_paths():
 
 
 def test_enable_and_disable_autostart(tmp_path):
-    # Setup mock project directory with start_bot_silent.vbs
+    # Setup mock project directory with setup/start_bot_silent.vbs
     mock_proj = tmp_path / "project"
-    mock_proj.mkdir()
-    vbs_file = mock_proj / "start_bot_silent.vbs"
+    setup_dir = mock_proj / "setup"
+    setup_dir.mkdir(parents=True)
+    vbs_file = setup_dir / "start_bot_silent.vbs"
     vbs_file.write_text("' mock vbs launcher\n", encoding="utf-8")
 
     mock_sc = tmp_path / "Startup" / "AntigravityTelegramBot.lnk"

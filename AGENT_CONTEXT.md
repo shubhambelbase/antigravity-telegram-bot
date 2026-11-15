@@ -10,22 +10,26 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - **CLI Binary**: `agy.exe` (`%LOCALAPPDATA%\agy\bin\agy.exe`)
 
 ## Architecture & Layout
+- `pyproject.toml` - Standard PEP 517/621 Python package configuration with `antigravity-bot` CLI entrypoint (`execution.telegram_bot:main`).
 - `directives/` - Standard Operating Procedures:
   - `antigravity_telegram_bridge.md`: Execution rules, timeouts, safety protocols.
-- `execution/` - Core Python services:
+- `execution/` - Core Python package:
+  - `__init__.py`: Package marker and metadata.
   - `progress_tracker.py`: Adaptive Progress System supporting Mode A (Indeterminate spinner for thinking/planning), Mode B (Activity-based weighted progress: planning 10, exploring 10, editing 30, testing 25, fixing 15, verification 10), and Mode C (Determinate measured progress e.g. 16/20 tests). Ensures non-decreasing monotonicity, 95% cap rules, compact 3-item activity display, and clean tag-stripped bullets.
   - `console_injector.py`: Win32 `AttachConsole`, `VkKeyScanW`, `MapVirtualKeyW`, and `WriteConsoleInputW` injector typing normal prompts and interactive keys (Yes/No/Select/Arrows/Ctrl+C).
   - `screenshot.py`: Desktop screen capture utility (WinSta0 / desktop attachment, PIL ImageGrab, Win32 GDI BitBlt) with blank/transparency validation (`is_blank_or_invalid_image`) and high-fidelity dark-mode terminal window snapshot renderer fallback.
   - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Embeds the Adaptive Progress Dashboard into the persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, consecutive line deduplication (`collapse_consecutive_lines`), compact sliding 8-line windowing (`format_terminal_window`), and separate event notifications for completions/errors.
   - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, extracting tool calls/thoughts, and pausable live sync mirror (`pause()`/`resume()`).
-  - `autostart.py`: Windows Startup folder shortcut manager (`enable_autostart`, `disable_autostart`, `is_autostart_enabled`) creating shortcuts for windowless background execution via `start_bot_silent.vbs`.
+  - `autostart.py`: Windows Startup folder shortcut manager (`enable_autostart`, `disable_autostart`, `is_autostart_enabled`) creating shortcuts for windowless background execution via `setup/start_bot_silent.vbs`.
   - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), workspace resolution, subdirectory listing, parent tracking, system drive discovery, recent workspaces history, and transcript modification time resolver (`_get_conversation_mtime`) fixing Windows/NTFS folder timestamp inertia.
   - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), live sync control (`/sync`, `/mute`, `sync:toggle`), auto-start controls (`/autostart`, `autostart:toggle`), session reuse in `on_pc_user`, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
-- `setup/` - Automated setup & guides:
+- `setup/` - Automated Windows setup, scripts & guides:
   - `push_to_github.bat`: Automated GitHub publisher with secret audit, test verification, gh CLI integration, and main branch push.
+  - `run_bot.bat`: Windows single-click launcher with auto-healing installer fallback.
+  - `start_bot_silent.vbs`: Windowless background launcher used by auto-start and startup shortcut.
   - `enable_autostart.bat` / `disable_autostart.bat`: 1-click Windows auto-start toggle scripts.
-  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements including pytest, runs 46 verification tests with 100% success, copies `.env.example`, pauses at end).
+  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs 46 verification tests, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.
 - `tests/` - Unit tests (46 passed):
   - `test_autostart.py`: Tests Windows Startup folder resolution, shortcut creation, enable/disable operations.
@@ -39,8 +43,6 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `test_injector.py`: Tests process detection, alphanumeric/symbol/space key event records, special keys (Yes/No/Select/Arrows/Ctrl+C), scan codes, and injection safety fallback.
 - `.tmp/` - Temporary files, recent workspaces ledger (`recent_workspaces.json`), and process run logs.
 - `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
-- `run_bot.bat` - Windows single-click launcher with auto-healing installer fallback.
-- `install.bat` - Root wrapper for `setup/install.bat`.
 
 ## Quick-Action Bottom Bar Keyboard
 - Row 1: `[ 📊 Status ]` `[ 📜 Sessions ]` `[ 📸 Screenshot ]`
