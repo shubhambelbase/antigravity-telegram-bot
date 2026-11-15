@@ -7,7 +7,7 @@ A lightweight, reliable, autonomous Telegram bot controller for Google Antigravi
 - **OS**: Windows
 - **Python**: 3.14 (.venv in project root)
 - **Key Libraries**: `python-telegram-bot` (v22+), `python-dotenv`, `psutil`, `pytest`, `ctypes` (Win32 API)
-- **CLI Binary**: `agy.exe` (`C:\Users\Shubham\AppData\Local\agy\bin\agy.exe`)
+- **CLI Binary**: `agy.exe` (`%LOCALAPPDATA%\agy\bin\agy.exe`)
 
 ## Architecture & Layout
 - `directives/` - Standard Operating Procedures:
@@ -18,6 +18,9 @@ A lightweight, reliable, autonomous Telegram bot controller for Google Antigravi
   - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), attach controls, and abort handling.
   - `telegram_bot.py`: Telegram long-polling bot with user whitelist security, throttled message streaming, inline buttons, `/sessions`, `/attach` commands, PID file single-instance lock, and rate-limited live tool updates.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
+- `setup/` - Automated setup & guides:
+  - `install.bat`: 1-click Windows installer (installs Python via winget if missing, creates `.venv`, installs requirements, runs test suite, copies `.env.example`).
+  - `setup_guide.md`: Complete step-by-step documentation for users cloning the repo.
 - `tests/` - Unit tests:
   - `test_runner.py`: Tests runner initialization, workspace switching, session resets, and conversation discovery.
   - `test_formatter.py`: Tests Markdown-to-HTML conversion.
@@ -26,6 +29,7 @@ A lightweight, reliable, autonomous Telegram bot controller for Google Antigravi
 - `.tmp/` - Temporary files and process run logs.
 - `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
 - `run_bot.bat` - Windows single-click launcher.
+- `install.bat` - Root wrapper for `setup/install.bat`.
 
 ## Commands Supported
 - `/start` - Initial verification, setup / claim instructions, command list.
@@ -40,5 +44,5 @@ A lightweight, reliable, autonomous Telegram bot controller for Google Antigravi
 - Plain text - Types prompt directly into the active PC terminal screen (or runs headlessly if no terminal is open).
 
 ## Status & Next Steps
-- Status: Codebase reviewed, polished, and fully tested. All 13 unit tests passing. Polling service operational.
+- Status: Fully separated codebase, automated winget installer, clean git tree. All 13 tests passing. Polling service operational.
 - Last updated: 2026-11-15.
