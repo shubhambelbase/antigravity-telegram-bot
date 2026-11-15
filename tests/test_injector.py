@@ -2,6 +2,7 @@ import pytest
 from execution.console_injector import (
     _build_char_records,
     find_interactive_agy_pid,
+    inject_special_key,
     inject_text_to_agy,
 )
 
@@ -14,6 +15,14 @@ def test_find_interactive_agy_pid():
 def test_inject_text_to_invalid_pid():
     res = inject_text_to_agy("test prompt", pid=99999999)
     assert res is False
+
+
+def test_inject_special_key_invalid():
+    res = inject_special_key("unsupported_xyz", pid=99999999)
+    assert res is False
+
+    res_valid_key = inject_special_key("yes", pid=99999999)
+    assert res_valid_key is False
 
 
 def test_build_char_records_alphanumeric():

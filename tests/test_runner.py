@@ -37,3 +37,13 @@ def test_runner_get_recent_conversations():
         assert hasattr(recents[0], "conv_id")
         assert hasattr(recents[0], "preview")
         assert hasattr(recents[0], "updated_at")
+
+
+def test_runner_get_session_turns_and_logs(tmp_path):
+    runner = AntigravityRunner()
+    # Test on non-existent session
+    turns = runner.get_session_turns("fake-uuid-not-exist")
+    assert turns == []
+
+    logs = runner.get_session_log_export("fake-uuid-not-exist")
+    assert "not found" in logs.lower()

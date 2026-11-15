@@ -275,3 +275,100 @@ def inject_text_to_agy(text: str, pid: Optional[int] = None) -> bool:
 
     finally:
         kernel32.FreeConsole()
+
+
+def inject_special_key(key_name: str, pid: Optional[int] = None) -> bool:
+    """Injects interactive navigation/prompt keys like 'yes', 'no', 'enter', 'up', 'down', 'space', '1', '2', 'ctrl_c'."""
+    target_pid = pid or find_interactive_agy_pid()
+    if not target_pid:
+        logger.warning("No interactive agy process found.")
+        return False
+
+    name = key_name.strip().lower()
+
+    if name in ("yes", "y"):
+        return inject_text_to_agy("y", pid=target_pid)
+    elif name in ("no", "n"):
+        return inject_text_to_agy("n", pid=target_pid)
+    elif name in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+        return inject_text_to_agy(name, pid=target_pid)
+
+    # Low-level virtual key codes for navigation & control
+    VK_MAP = {
+        "enter": (0x0D, 0x1C, "\r", 0),
+        "return": (0x0D, 0x1C, "\r", 0),
+        "up": (0x26, 0x48, "\x00", 0x0100),       # ENHANCED_KEY
+        "down": (0x28, 0x50, "\x00", 0x0100),     # ENHANCED_KEY
+        "left": (0x25, 0x4B, "\x00", 0x0100),     # ENHANCED_KEY
+        "right": (0x27, 0x4D, "\x00", 0x0100),    # ENHANCED_KEY
+        "space": (0x20, 0x39, " ", 0),
+        "backspace": (0x08, 0x0E, "\b", 0),
+        "tab": (0x09, 0x0F, "\t", 0),
+        "escape": (0x1B, 0x01, "\x1B", 0),
+        "ctrl_c": (0x43, 0x2E, "\x03", 0x0008),   # LEFT_CTRL_PRESSED
+    }
+
+    if name not in VK_MAP:
+        logger.warning(f"Unsupported special key: {name}")
+        return False
+
+    vk, scan, uchar, ctrl_state = VK_MAP[name]
+
+    kernel32.FreeConsole()
+    if not kernel32.AttachConsole(target_pid):
+        logger.warning(f"Failed to AttachConsole to PID {target_pid}")
+        return False
+
+    try:
+        h_conin = kernel32.CreateFileW(
+            "CONIN$",
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            0,
+            None,
+        )
+        if h_conin == INVALID_HANDLE_VALUE or not h_conin:
+            return False
+
+        written = wintypes.DWORD()
+        single_type = INPUT_RECORD * 1
+
+        # KeyDown
+        rec_down = INPUT_RECORD()
+        rec_down.EventType = KEY_EVENT
+        rec_down.Event.KeyEvent.bKeyDown = True
+        rec_down.Event.KeyEvent.wRepeatCount = 1
+        rec_down.Event.KeyEvent.UnicodeChar = uchar
+        rec_down.Event.KeyEvent.wVirtualKeyCode = vk
+        rec_down.Event.KeyEvent.wVirtualScanCode = scan
+        rec_down.Event.KeyEvent.dwControlKeyState = ctrl_state
+        arr_down = single_type(rec_down)
+        kernel32.WriteConsoleInputW(h_conin, arr_down, 1, ctypes.byref(written))
+
+        time.sleep(0.03)
+
+        # KeyUp
+        rec_up = INPUT_RECORD()
+        rec_up.EventType = KEY_EVENT
+        rec_up.Event.KeyEvent.bKeyDown = False
+        rec_up.Event.KeyEvent.wRepeatCount = 1
+        rec_up.Event.KeyEvent.UnicodeChar = uchar
+        rec_up.Event.KeyEvent.wVirtualKeyCode = vk
+        rec_up.Event.KeyEvent.wVirtualScanCode = scan
+        rec_up.Event.KeyEvent.dwControlKeyState = ctrl_state
+        arr_up = single_type(rec_up)
+        kernel32.WriteConsoleInputW(h_conin, arr_up, 1, ctypes.byref(written))
+
+        time.sleep(0.02)
+        kernel32.CloseHandle(h_conin)
+        logger.info(f"Injected special key '{name}' to PID {target_pid}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error injecting special key: {e}")
+        return False
+    finally:
+        kernel32.FreeConsole()
+

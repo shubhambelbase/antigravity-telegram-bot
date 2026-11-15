@@ -1,10 +1,11 @@
-"""Autonomous Antigravity Telegram Bot Controller.
+"""Autonomous Antigravity Telegram Bot Remote Control.
 
-Listens for Telegram commands, handles inline session-switching buttons,
-directly types into the open desktop PC terminal screen in real-time,
-mirrors live PC terminal interactions and tool logs (Thought/Ran/Edited) to Telegram,
-provides a persistent Quick-Action Keyboard (Bottom Bar) for 1-tap commands,
-and streams progress back with a Hybrid Message Editing + Event-Based Streaming mechanism.
+Provides a full remote control center for Google Antigravity CLI:
+1. CLI Connection: Live status monitoring (Desktop Terminal vs Headless).
+2. Terminal Controls: Normal command input, instant keystroke injection.
+3. Interactive Prompts: Inline keypad for Yes / No / Select (1, 2, 3), Arrows, and Ctrl+C.
+4. Live Output: Hybrid streaming terminal view with 1s updates.
+5. Session History & Logs: /history inspection and /logs export/download.
 """
 
 import atexit
@@ -36,7 +37,11 @@ from telegram.ext import (
 )
 
 from execution.agy_runner import AntigravityRunner, ConversationInfo
-from execution.console_injector import find_interactive_agy_pid, inject_text_to_agy
+from execution.console_injector import (
+    find_interactive_agy_pid,
+    inject_special_key,
+    inject_text_to_agy,
+)
 from execution.formatter import markdown_to_telegram_html
 from execution.screenshot import get_screenshot
 from execution.stream_manager import TerminalStreamManager
@@ -63,11 +68,38 @@ AGY_PATH = os.getenv("AGY_PATH")
 QUICK_ACTION_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📊 Status"), KeyboardButton("📜 Sessions"), KeyboardButton("📸 Screenshot")],
-        [KeyboardButton("📁 PWD"), KeyboardButton("🔄 New Turn"), KeyboardButton("🛑 Stop Task")],
+        [KeyboardButton("📁 PWD"), KeyboardButton("🎮 Controls"), KeyboardButton("🛑 Stop Task")],
     ],
     resize_keyboard=True,
     is_persistent=True,
 )
+
+
+def get_interactive_controls_markup() -> InlineKeyboardMarkup:
+    """Generates the interactive terminal keypad for Yes/No/Select/Navigation."""
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes (Y)", callback_data="key:yes"),
+            InlineKeyboardButton("❌ No (N)", callback_data="key:no"),
+            InlineKeyboardButton("⏎ Enter", callback_data="key:enter"),
+        ],
+        [
+            InlineKeyboardButton("⬆️ Up", callback_data="key:up"),
+            InlineKeyboardButton("⬇️ Down", callback_data="key:down"),
+            InlineKeyboardButton("␣ Space", callback_data="key:space"),
+        ],
+        [
+            InlineKeyboardButton("1️⃣ Select 1", callback_data="key:1"),
+            InlineKeyboardButton("2️⃣ Select 2", callback_data="key:2"),
+            InlineKeyboardButton("3️⃣ Select 3", callback_data="key:3"),
+        ],
+        [
+            InlineKeyboardButton("🛑 Ctrl+C", callback_data="key:ctrl_c"),
+            InlineKeyboardButton("⌫ Backspace", callback_data="key:backspace"),
+            InlineKeyboardButton("📸 Screenshot", callback_data="key:screenshot"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 
 def parse_allowed_ids() -> Set[int]:
@@ -157,26 +189,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     interactive_pid = find_interactive_agy_pid()
-    screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless (No desktop terminal)"
-    conv_text = f"<code>{runner.conversation_id}</code>" if runner.conversation_id else "Auto-Tracking"
+    screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless Runner"
+    conv_text = f"<code>{runner.conversation_id[:8]}...</code>" if runner.conversation_id else "Auto-Tracking"
 
     welcome_text = (
-        f"🤖 <b>Antigravity Controller Online</b>\n\n"
-        f"<b>PC Screen Control:</b> {screen_status}\n"
-        f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
-        f"<b>Session:</b> {conv_text}\n"
-        f"<b>Quick Keyboard:</b> Persistent Menu Active Below 👇\n\n"
-        f"<b>Quick Actions:</b>\n"
-        f"• Tap any button on the bottom bar for instant access\n"
-        f"• Type any prompt to execute live on your PC screen\n"
-        f"• /status - Check host health, active session, and CPU/RAM\n"
-        f"• /sessions - View recent sessions with 1-click attach buttons\n"
-        f"• /screenshot - Capture a live desktop or terminal snapshot\n"
-        f"• /cd &lt;path&gt; - Switch active workspace directory\n"
-        f"• /pwd - Show current working directory\n"
-        f"• /new - Start fresh conversation session\n"
-        f"• /stop - Immediately kill running task\n"
-        f"• /help - View command details"
+        f"⚡ <b>Antigravity Remote Control Online</b>\n\n"
+        f"<b>CLI Connection:</b> {screen_status}\n"
+        f"<b>Active Session:</b> {conv_text}\n"
+        f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n\n"
+        f"<b>Terminal Controls:</b>\n"
+        f"• Type any normal command to execute live\n"
+        f"• 🎮 <b>/controls</b> - Interactive keypad for Yes/No/Select/Arrows\n"
+        f"• 📜 <b>/sessions</b> - Switch sessions or export logs\n"
+        f"• 📑 <b>/history</b> - View recent conversation turns\n"
+        f"• 📄 <b>/logs</b> - Download complete session transcript\n"
+        f"• 📸 <b>/screenshot</b> - Live desktop/terminal screen view\n"
+        f"• 📁 <b>/pwd</b> &amp; <b>/cd &lt;path&gt;</b> - Workspace navigation\n"
+        f"• 🛑 <b>/stop</b> - Kill active task immediately"
     )
     await update.message.reply_text(
         welcome_text,
@@ -216,6 +245,26 @@ async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_controls(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the interactive terminal keypad for Yes/No/Select/Navigation."""
+    if not await check_auth(update):
+        return
+
+    interactive_pid = find_interactive_agy_pid()
+    status_text = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless"
+
+    msg = (
+        f"🎮 <b>Antigravity Remote Keypad</b>\n\n"
+        f"<b>CLI Connection:</b> {status_text}\n"
+        f"<i>Tap any button below to inject actions directly into your active terminal:</i>"
+    )
+    await update.message.reply_text(
+        msg,
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_interactive_controls_markup(),
+    )
+
+
 async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
@@ -228,7 +277,7 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    lines = ["📜 <b>Recent Antigravity Sessions:</b>\n"]
+    lines = ["📜 <b>Antigravity Session History:</b>\n"]
     keyboard = []
 
     for idx, s in enumerate(recents, 1):
@@ -237,14 +286,81 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>{idx}.</b> <code>{s.conv_id[:8]}...</code> ({s.updated_at}){is_active}\n"
             f"   <i>\"{html.escape(s.preview)}\"</i>\n"
         )
-        btn_label = f"Attach #{idx} ({s.conv_id[:8]})"
-        if runner.conversation_id == s.conv_id:
-            btn_label = f"✅ Active #{idx} ({s.conv_id[:8]})"
-        keyboard.append([InlineKeyboardButton(btn_label, callback_data=f"attach:{s.conv_id}")])
+        attach_label = f"✅ Active #{idx}" if runner.conversation_id == s.conv_id else f"🔗 Attach #{idx}"
+        keyboard.append([
+            InlineKeyboardButton(attach_label, callback_data=f"attach:{s.conv_id}"),
+            InlineKeyboardButton(f"📄 Logs #{idx}", callback_data=f"logs:{s.conv_id}"),
+        ])
 
-    lines.append("<i>Tap an inline button below to attach to that session with full history:</i>")
+    lines.append("<i>Tap 'Attach' to continue session, or 'Logs' to inspect history:</i>")
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+
+
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays recent conversation turns for the active session."""
+    if not await check_auth(update):
+        return
+
+    limit = 5
+    if context.args and context.args[0].isdigit():
+        limit = min(15, max(1, int(context.args[0])))
+
+    turns = runner.get_session_turns(limit=limit)
+    if not turns:
+        await update.message.reply_text(
+            "ℹ️ No recorded conversation turns found for active session.",
+            reply_markup=QUICK_ACTION_KEYBOARD,
+        )
+        return
+
+    lines = [f"📜 <b>Session History (Last {len(turns)} Turns):</b>\n"]
+    for i, t in enumerate(turns, 1):
+        u_preview = t["user"].replace("\n", " ")
+        if len(u_preview) > 90:
+            u_preview = u_preview[:87] + "..."
+        m_preview = t["model"].replace("\n", " ") if t["model"] else "(Turn in progress or tool actions only)"
+        if len(m_preview) > 120:
+            m_preview = m_preview[:117] + "..."
+
+        lines.append(
+            f"<b>Turn {i}</b> <i>[{html.escape(t['timestamp'])}]</i>\n"
+            f"👤 <b>User:</b> {html.escape(u_preview)}\n"
+            f"🤖 <b>Agent:</b> {html.escape(m_preview)} <i>(Tools: {t['tools_count']})</i>\n"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=QUICK_ACTION_KEYBOARD)
+
+
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Exports and sends session execution logs."""
+    if not await check_auth(update):
+        return
+
+    conv_id = context.args[0].strip() if context.args else None
+    target_id = conv_id or runner.conversation_id or runner._get_latest_conversation_id()
+
+    if not target_id:
+        await update.message.reply_text("ℹ️ No active session to export logs from.", reply_markup=QUICK_ACTION_KEYBOARD)
+        return
+
+    log_content = runner.get_session_log_export(conv_id=target_id, max_lines=250)
+
+    if len(log_content) <= 3500:
+        await update.message.reply_text(
+            f"📄 <b>Session Execution Log (<code>{target_id[:8]}...</code>):</b>\n\n"
+            f"<pre><code>{html.escape(log_content)}</code></pre>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=QUICK_ACTION_KEYBOARD,
+        )
+    else:
+        doc = io.BytesIO(log_content.encode("utf-8"))
+        doc.name = f"session_{target_id[:8]}_log.txt"
+        await update.message.reply_document(
+            document=doc,
+            caption=f"📄 Full session execution log ({target_id[:8]}...)",
+            reply_markup=QUICK_ACTION_KEYBOARD,
+        )
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,13 +368,31 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if not query:
         return
 
-    await query.answer()
     user = update.effective_user
     if not user or not is_authorized(user.id):
+        await query.answer("Unauthorized", show_alert=True)
         return
 
     data = query.data or ""
-    if data.startswith("attach:"):
+
+    # 1. Interactive Keypad Injections
+    if data.startswith("key:"):
+        key_name = data.split("key:", 1)[1]
+        if key_name == "screenshot":
+            await query.answer("Capturing screenshot...")
+            await cmd_screenshot(update, context)
+            return
+
+        ok = inject_special_key(key_name)
+        if ok:
+            await query.answer(f"Sent: {key_name.upper()}")
+        else:
+            await query.answer(f"Failed to send {key_name} (No active desktop terminal)", show_alert=True)
+        return
+
+    # 2. Attach Session
+    elif data.startswith("attach:"):
+        await query.answer()
         conv_id = data.split("attach:", 1)[1]
         if runner.set_conversation(conv_id):
             await query.edit_message_reply_markup(reply_markup=None)
@@ -274,6 +408,13 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 parse_mode=ParseMode.HTML,
                 reply_markup=QUICK_ACTION_KEYBOARD,
             )
+
+    # 3. Export Logs for Session
+    elif data.startswith("logs:"):
+        await query.answer("Fetching logs...")
+        conv_id = data.split("logs:", 1)[1]
+        context.args = [conv_id]
+        await cmd_logs(update, context)
 
 
 async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -335,12 +476,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless (No active terminal)"
 
     status_msg = (
-        f"📊 <b>System & Agent Status</b>\n\n"
-        f"<b>PC Screen Control:</b> {screen_status}\n"
+        f"📊 <b>System & Remote Control Status</b>\n\n"
+        f"<b>CLI Connection:</b> {screen_status}\n"
         f"<b>Agent Status:</b> {agent_state}\n"
         f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
         f"<b>Active Session:</b> {conv_text}\n"
-        f"<b>Streaming Engine:</b> 🟢 Hybrid Message Editing + Event Alerts\n"
+        f"<b>Terminal Engine:</b> 🟢 Live Output Streaming + Paced Keystroke Injector\n"
         f"<b>Host CPU:</b> {cpu_pct}%\n"
         f"<b>Host RAM:</b> {mem.percent}% ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)"
     )
@@ -363,7 +504,7 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
             active_terminal_text = session.get_full_buffer_text()
 
     status_msg = await update.message.reply_text(
-        "📸 <i>Capturing PC screen snapshot...</i>",
+        "📸 <i>Capturing screen snapshot...</i>",
         parse_mode=ParseMode.HTML,
     )
 
@@ -450,9 +591,15 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session and session.is_active:
             await session.cancel()
 
+    # Also attempt sending Ctrl+C into open interactive terminal
+    interactive_pid = find_interactive_agy_pid()
+    if interactive_pid:
+        inject_special_key("ctrl_c", pid=interactive_pid)
+
     if not runner.is_running:
         await update.message.reply_text(
-            "ℹ️ No active Antigravity task is currently running.",
+            "🛑 <b>Stop signal sent.</b> (Interactive terminal interrupted / idle runner)",
+            parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
         return
@@ -460,7 +607,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     killed = await runner.cancel()
     if killed:
         await update.message.reply_text(
-            "🛑 <b>Active task killed successfully.</b>",
+            "🛑 <b>Active headless task killed successfully.</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
@@ -495,11 +642,17 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif prompt_norm in ("📁 PWD", "pwd"):
         await cmd_pwd(update, context)
         return
-    elif prompt_norm in ("🔄 New Turn", "new"):
-        await cmd_new(update, context)
+    elif prompt_norm in ("🎮 Controls", "controls", "keypad"):
+        await cmd_controls(update, context)
         return
     elif prompt_norm in ("🛑 Stop Task", "stop", "cancel"):
         await cmd_stop(update, context)
+        return
+    elif prompt_norm in ("history", "/history"):
+        await cmd_history(update, context)
+        return
+    elif prompt_norm in ("logs", "/logs"):
+        await cmd_logs(update, context)
         return
 
     # 2. Shortcut handling for 'attach'
@@ -590,7 +743,7 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conv_footer = f"\n\n<i>Session: <code>{runner.conversation_id}</code></i>" if runner.conversation_id else ""
     formatted_html = markdown_to_telegram_html(final_text)
 
-    # Send separate completion notification
+    # Send separate completion notification with interactive keypad
     event_notification = f"✅ <b>Task Completed:</b>\n\n{formatted_html}{conv_footer}"
     await session.complete(
         final_status="Completed",
@@ -682,7 +835,7 @@ async def post_init(application: Application):
                             chat_id=user_id,
                             text=event_notification,
                             parse_mode=ParseMode.HTML,
-                            reply_markup=QUICK_ACTION_KEYBOARD,
+                            reply_markup=get_interactive_controls_markup(),
                         )
                     else:
                         doc = io.BytesIO(content.encode("utf-8"))
@@ -691,7 +844,7 @@ async def post_init(application: Application):
                             chat_id=user_id,
                             text="🤖 <b>[Antigravity Response]</b>\n<i>(Output attached below due to length)</i>",
                             parse_mode=ParseMode.HTML,
-                            reply_markup=QUICK_ACTION_KEYBOARD,
+                            reply_markup=get_interactive_controls_markup(),
                         )
                         await application.bot.send_document(
                             chat_id=user_id,
@@ -734,7 +887,7 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN is missing in .env")
         return
 
-    logger.info("Starting Antigravity Telegram Bot with Persistent Quick-Action Keyboard & Screenshot...")
+    logger.info("Starting Antigravity Remote Control with Interactive Controls & Session History...")
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -749,6 +902,10 @@ def main():
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("attach", cmd_attach))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("controls", cmd_controls))
+    app.add_handler(CommandHandler("keys", cmd_controls))
+    app.add_handler(CommandHandler("history", cmd_history))
+    app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("screenshot", cmd_screenshot))
     app.add_handler(CommandHandler("cd", cmd_cd))
     app.add_handler(CommandHandler("pwd", cmd_pwd))
@@ -760,7 +917,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
     app.add_error_handler(global_error_handler)
 
-    logger.info("Bot is polling with Quick-Action Keyboard and Screenshot Engine...")
+    logger.info("Antigravity Remote Control is polling with interactive terminal controls...")
     app.run_polling()
 
 

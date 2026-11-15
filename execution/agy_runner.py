@@ -108,6 +108,108 @@ class AntigravityRunner:
             results.append(ConversationInfo(conv_id=conv_id, updated_at=dt_str, preview=preview))
         return results
 
+    def get_session_turns(self, conv_id: Optional[str] = None, limit: int = 5) -> List[Dict[str, Any]]:
+        """Extracts recent conversation turns (user requests and model responses) for a session."""
+        target_id = conv_id or self.conversation_id or self._get_latest_conversation_id()
+        if not target_id:
+            return []
+
+        path = os.path.join(self.brain_dir, target_id, ".system_generated", "logs", "transcript.jsonl")
+        if not os.path.isfile(path):
+            return []
+
+        turns = []
+        current_turn: Dict[str, Any] = {"user": "", "model": "", "tools_count": 0, "timestamp": ""}
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                        src = record.get("source")
+                        rec_type = record.get("type")
+                        content = record.get("content", "")
+                        ts = record.get("created_at", "")[:19].replace("T", " ")
+
+                        if src == "USER_EXPLICIT" and rec_type == "USER_INPUT":
+                            if current_turn["user"]:
+                                turns.append(current_turn)
+                            clean_u = content
+                            if "<USER_REQUEST>" in content:
+                                clean_u = content.split("<USER_REQUEST>")[1].split("</USER_REQUEST>")[0].strip()
+                            current_turn = {"user": clean_u, "model": "", "tools_count": 0, "timestamp": ts}
+                        elif src == "MODEL" and rec_type == "PLANNER_RESPONSE":
+                            tcs = record.get("tool_calls", [])
+                            if tcs:
+                                current_turn["tools_count"] += len(tcs)
+                            if content and content.strip():
+                                current_turn["model"] = content.strip()
+                    except Exception:
+                        pass
+            if current_turn["user"]:
+                turns.append(current_turn)
+        except Exception:
+            pass
+
+        return turns[-limit:]
+
+    def get_session_log_export(self, conv_id: Optional[str] = None, max_lines: int = 200) -> str:
+        """Generates a clean human-readable log export for a session."""
+        target_id = conv_id or self.conversation_id or self._get_latest_conversation_id()
+        if not target_id:
+            return "No active or recorded session found."
+
+        path = os.path.join(self.brain_dir, target_id, ".system_generated", "logs", "transcript.jsonl")
+        if not os.path.isfile(path):
+            return f"Session transcript file not found for: {target_id}"
+
+        output_lines = [
+            "=== Antigravity Session Log ===",
+            f"Session ID: {target_id}",
+            f"Brain Directory: {os.path.join(self.brain_dir, target_id)}",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "=" * 35,
+            "",
+        ]
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        r = json.loads(line)
+                        src = r.get("source", "")
+                        rtype = r.get("type", "")
+                        ts = r.get("created_at", "")[:19].replace("T", " ")
+                        content = r.get("content", "")
+
+                        if src == "USER_EXPLICIT":
+                            clean = content
+                            if "<USER_REQUEST>" in content:
+                                clean = content.split("<USER_REQUEST>")[1].split("</USER_REQUEST>")[0].strip()
+                            output_lines.append(f"[{ts}] USER: {clean}\n")
+                        elif src == "MODEL" and rtype == "PLANNER_RESPONSE":
+                            th = r.get("thinking", "")
+                            if th and th.strip():
+                                first_th = th.strip().splitlines()[0][:90]
+                                output_lines.append(f"[{ts}] ○ Thought: {first_th}")
+                            for tc in r.get("tool_calls", []):
+                                tname = tc.get("name", "tool")
+                                args = tc.get("args", {})
+                                arg_keys = list(args.keys()) if isinstance(args, dict) else []
+                                output_lines.append(f"[{ts}] ● Tool: {tname}({arg_keys})")
+                            if content and content.strip():
+                                output_lines.append(f"[{ts}] MODEL: {content.strip()[:200]}...\n")
+                    except Exception:
+                        pass
+        except Exception as e:
+            output_lines.append(f"Error reading transcript: {e}")
+
+        return "\n".join(output_lines[-max_lines:])
+
     def _get_latest_conversation_id(self) -> Optional[str]:
         """Returns the ID of the most recently modified conversation in brain."""
         if not os.path.isdir(self.brain_dir):
