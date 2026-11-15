@@ -160,8 +160,31 @@ def capture_win32_gdi() -> Optional[Image.Image]:
         return None
 
 
+def optimize_and_compress_image(
+    img: Image.Image,
+    max_dimension: int = 1600,
+    quality: int = 85,
+    format: str = "JPEG",
+) -> bytes:
+    """Resizes large images preserving aspect ratio and compresses to optimized bytes (JPEG or PNG)."""
+    width, height = img.size
+    if max(width, height) > max_dimension:
+        ratio = max_dimension / max(width, height)
+        new_size = (max(1, int(width * ratio)), max(1, int(height * ratio)))
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        img = img.resize(new_size, resample=resample)
+
+    buf = io.BytesIO()
+    if format.upper() in ("JPEG", "JPG"):
+        rgb_img = img.convert("RGB")
+        rgb_img.save(buf, format="JPEG", quality=quality, optimize=True)
+    else:
+        img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
 def capture_desktop_screenshot() -> Optional[bytes]:
-    """Attempts to capture physical desktop screen with blank/transparency validation."""
+    """Attempts to capture physical desktop screen with blank/transparency validation and compression."""
     ensure_desktop_access()
 
     # Method 1: PIL ImageGrab (with WinSta0 attachment)
@@ -174,9 +197,7 @@ def capture_desktop_screenshot() -> Optional[bytes]:
             img = ImageGrab.grab()
 
         if img and not is_blank_or_invalid_image(img):
-            buf = io.BytesIO()
-            img.convert("RGB").save(buf, format="PNG")
-            return buf.getvalue()
+            return optimize_and_compress_image(img, max_dimension=1600, quality=85)
     except Exception as e:
         logger.debug(f"PIL ImageGrab not available or blank: {e}")
 
@@ -184,9 +205,7 @@ def capture_desktop_screenshot() -> Optional[bytes]:
     try:
         win_img = capture_win32_gdi()
         if win_img and not is_blank_or_invalid_image(win_img):
-            buf = io.BytesIO()
-            win_img.save(buf, format="PNG")
-            return buf.getvalue()
+            return optimize_and_compress_image(win_img, max_dimension=1600, quality=85)
     except Exception as e:
         logger.debug(f"Win32 GDI capture failed or blank: {e}")
 
@@ -215,7 +234,7 @@ def capture_desktop_screenshot() -> Optional[bytes]:
             data = base64.b64decode(raw_b64)
             ps_img = Image.open(io.BytesIO(data))
             if not is_blank_or_invalid_image(ps_img):
-                return data
+                return optimize_and_compress_image(ps_img, max_dimension=1600, quality=85)
     except Exception as e:
         logger.debug(f"PowerShell screen copy failed or blank: {e}")
 

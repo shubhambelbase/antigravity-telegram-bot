@@ -197,3 +197,46 @@ def test_manager_session_management():
         assert mgr.get_session(111) is None
 
     asyncio.run(_run())
+
+
+def test_stream_session_html_fallback():
+    async def _run():
+        mock_bot = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.message_id = 8888
+
+        # First call (start): returns mock_msg
+        # Second call (complete with HTML): raises Exception (simulating bad entities)
+        # Third call (fallback plain text): returns mock_msg
+        call_count = 0
+        async def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise Exception("Can't parse entities: unclosed token")
+            return mock_msg
+
+        mock_bot.send_message = AsyncMock(side_effect=side_effect)
+        mock_bot.edit_message_text = AsyncMock(return_value=True)
+
+        session = HybridStreamSession(
+            bot=mock_bot,
+            chat_id=123,
+            title="Fallback Test",
+            edit_interval=0.05,
+            buffer_debounce=0.01,
+        )
+        await session.start()
+        await session.complete(
+            final_status="Done",
+            event_notification="<b>Unclosed bold tag and <custom_entity>",
+        )
+
+        # Verified fallback occurred: 3 send_message calls total
+        assert call_count == 3
+        # Last call had parse_mode=None (plain text fallback)
+        assert mock_bot.send_message.call_args_list[2].kwargs.get("parse_mode") is None
+        fallback_text = mock_bot.send_message.call_args_list[2].kwargs.get("text")
+        assert "Unclosed bold tag" in fallback_text
+
+    asyncio.run(_run())

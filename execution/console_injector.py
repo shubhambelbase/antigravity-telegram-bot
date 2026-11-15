@@ -62,6 +62,9 @@ kernel32.WriteConsoleInputW.argtypes = [
 ]
 kernel32.WriteConsoleInputW.restype = wintypes.BOOL
 
+kernel32.GenerateConsoleCtrlEvent.argtypes = [wintypes.DWORD, wintypes.DWORD]
+kernel32.GenerateConsoleCtrlEvent.restype = wintypes.BOOL
+
 user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
 user32.VkKeyScanW.restype = ctypes.c_short
 
@@ -429,6 +432,13 @@ def inject_special_key(key_name: str, pid: Optional[int] = None) -> bool:
 
                 time.sleep(0.02)
                 success = True
+
+                if name == "ctrl_c":
+                    try:
+                        # Send CTRL_C_EVENT (0) to process group
+                        kernel32.GenerateConsoleCtrlEvent(0, 0)
+                    except Exception:
+                        pass
             else:
                 err_message = "Failed to open CONIN$ for special key writing."
         except Exception as e:

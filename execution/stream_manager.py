@@ -247,19 +247,35 @@ class HybridStreamSession:
         if event_notification:
             try:
                 if len(event_notification) <= 3900:
-                    await self.bot.send_message(
-                        chat_id=self.chat_id,
-                        text=event_notification,
-                        parse_mode="HTML",
-                    )
+                    try:
+                        await self.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=event_notification,
+                            parse_mode="HTML",
+                        )
+                    except Exception as html_err:
+                        logger.warning(f"HTML send failed in complete(), retrying plain-text: {html_err}")
+                        plain_body = re.sub(r"<[^>]+>", "", event_notification)
+                        await self.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=plain_body or event_notification,
+                            parse_mode=None,
+                        )
                 else:
                     # If formatted notification exceeds 3900 chars, send summary and attach text document
                     summary_header = "✅ <b>Task Completed</b>\n<i>Output exceeds message length limit, attached below:</i>"
-                    await self.bot.send_message(
-                        chat_id=self.chat_id,
-                        text=summary_header,
-                        parse_mode="HTML",
-                    )
+                    try:
+                        await self.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=summary_header,
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        await self.bot.send_message(
+                            chat_id=self.chat_id,
+                            text="✅ Task Completed\nOutput exceeds message length limit, attached below:",
+                            parse_mode=None,
+                        )
                     content_to_attach = full_output or event_notification
                     doc_bytes = io.BytesIO(content_to_attach.encode("utf-8"))
                     doc_bytes.name = "antigravity_output.txt"
@@ -286,11 +302,19 @@ class HybridStreamSession:
             f"<code>{html.escape(error_message)}</code>"
         )
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=error_event,
-                parse_mode="HTML",
-            )
+            try:
+                await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=error_event,
+                    parse_mode="HTML",
+                )
+            except Exception as html_err:
+                logger.warning(f"HTML send failed in fail(), retrying plain-text: {html_err}")
+                await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"❌ Execution Error Occurred:\n\n{error_message}",
+                    parse_mode=None,
+                )
         except Exception as e:
             logger.error(f"Failed to send error notification: {e}")
 
@@ -304,11 +328,18 @@ class HybridStreamSession:
         await self._edit_live_message(status="Cancelled")
 
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text="🛑 <b>Task Cancelled.</b>\n<i>Execution terminated by user request.</i>",
-                parse_mode="HTML",
-            )
+            try:
+                await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="🛑 <b>Task Cancelled.</b>\n<i>Execution terminated by user request.</i>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="🛑 Task Cancelled.\nExecution terminated by user request.",
+                    parse_mode=None,
+                )
         except Exception as e:
             logger.error(f"Failed to send cancel notification: {e}")
 

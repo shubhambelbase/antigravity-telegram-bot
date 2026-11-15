@@ -14,6 +14,7 @@ import html
 import io
 import logging
 import os
+import string
 import time
 from typing import Dict, List, Optional, Set
 
@@ -761,16 +762,18 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         interactive_pid = find_interactive_agy_pid()
         title = f"Antigravity Terminal (PID {interactive_pid})" if interactive_pid else "Antigravity Console"
-        png_bytes, caption = get_screenshot(fallback_terminal_text=active_terminal_text, title=title)
+        img_bytes, caption = get_screenshot(fallback_terminal_text=active_terminal_text, title=title)
 
-        photo_stream = io.BytesIO(png_bytes)
-        photo_stream.name = "screenshot.png"
+        photo_stream = io.BytesIO(img_bytes)
+        photo_stream.name = "screenshot.jpg" if img_bytes.startswith(b"\xff\xd8") else "screenshot.png"
 
         await msg.reply_photo(
             photo=photo_stream,
             caption=f"{caption}\n<i>Host: Windows | Screen Control: {'🟢 Connected' if interactive_pid else '⚪ Headless'}</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
+            write_timeout=60,
+            read_timeout=60,
         )
         await status_msg.delete()
     except Exception as e:
@@ -978,12 +981,21 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Also attempt sending Ctrl+C into open interactive terminal
     interactive_pid = find_interactive_agy_pid()
+    injected_stop = False
     if interactive_pid:
-        inject_special_key("ctrl_c", pid=interactive_pid)
+        injected_stop = inject_special_key("ctrl_c", pid=interactive_pid)
 
     if not runner.is_running:
+        if interactive_pid:
+            status_desc = (
+                f"🛑 <b>Stop signal (Ctrl+C) sent to desktop terminal (PID {interactive_pid}).</b>"
+                if injected_stop
+                else f"⚠️ Attempted Ctrl+C on PID {interactive_pid}, but terminal did not respond."
+            )
+        else:
+            status_desc = "ℹ️ <b>No active Antigravity task is currently executing.</b>"
         await update.message.reply_text(
-            "🛑 <b>Stop signal sent.</b> (Interactive terminal interrupted / idle runner)",
+            status_desc,
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
@@ -1059,7 +1071,13 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_attach(update, context)
         return
 
-    if len(cleaned_input) >= 6 and not " " in cleaned_input:
+    # Auto-attach only on valid UUID prefixes (at least 8 hex/hyphen chars)
+    is_uuid_prefix = (
+        len(cleaned_input) >= 8
+        and " " not in cleaned_input
+        and all(c in string.hexdigits or c == "-" for c in cleaned_input)
+    )
+    if is_uuid_prefix:
         matched = [
             s for s in runner.get_recent_conversations(limit=10)
             if s.conv_id.startswith(cleaned_input) or s.conv_id.lower().startswith(cleaned_input)

@@ -186,7 +186,12 @@ class TranscriptWatcher:
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
                         f.seek(self._last_offset)
                         new_lines = f.readlines()
-                        self._last_offset = f.tell()
+                        if new_lines and not new_lines[-1].endswith("\n"):
+                            incomplete = new_lines.pop()
+                            # Rewind offset by the incomplete line's byte length so it will be read completely once flushed
+                            self._last_offset = f.tell() - len(incomplete.encode("utf-8", errors="replace"))
+                        else:
+                            self._last_offset = f.tell()
 
                     for line in new_lines:
                         if not line.strip():
