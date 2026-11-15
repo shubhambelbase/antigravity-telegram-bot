@@ -8,12 +8,31 @@ import html
 import re
 from typing import List
 
+# Patterns matching sensitive tokens and secrets
+TELEGRAM_TOKEN_RE = re.compile(r"([0-9]{8,12}:[a-zA-Z0-9_-]{34,38})")
+API_KEY_PATTERNS = [
+    re.compile(r"\b(?:sk-[a-zA-Z0-9]{20,})\b"),
+    re.compile(r"\b(?:ghp_[a-zA-Z0-9]{20,})\b"),
+    re.compile(r"\b(?:AIza[0-9A-Za-z-_]{35})\b"),
+]
+
+
+def sanitize_secrets(text: str) -> str:
+    """Masks sensitive credentials, Telegram bot tokens, and API keys."""
+    if not text:
+        return ""
+    sanitized = TELEGRAM_TOKEN_RE.sub("[REDACTED_TELEGRAM_TOKEN]", text)
+    for pat in API_KEY_PATTERNS:
+        sanitized = pat.sub("[REDACTED_API_KEY]", sanitized)
+    return sanitized
+
 
 def markdown_to_telegram_html(text: str) -> str:
-    """Safely converts markdown to Telegram HTML."""
+    """Safely converts markdown to Telegram HTML with automatic secret redaction."""
     if not text:
         return ""
 
+    text = sanitize_secrets(text)
     code_blocks: List[str] = []
 
     def replace_code_block(match: re.Match) -> str:

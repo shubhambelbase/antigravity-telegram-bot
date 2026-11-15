@@ -9,13 +9,18 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 import string
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncGenerator, Callable, Dict, List, Optional
 
+from execution.formatter import sanitize_secrets
+
 logger = logging.getLogger(__name__)
+
+SAFE_CONV_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
 @dataclass
@@ -175,17 +180,25 @@ class AntigravityRunner:
         self.conversation_id = None
 
     def set_conversation(self, conv_id: str) -> bool:
-        """Sets the active conversation ID directly."""
+        """Sets the active conversation ID directly with strict path traversal prevention."""
         clean_id = conv_id.strip()
-        conv_path = os.path.join(self.brain_dir, clean_id)
+        if not SAFE_CONV_ID_RE.match(clean_id):
+            return False
+
+        conv_path = os.path.abspath(os.path.join(self.brain_dir, clean_id))
+        brain_abs = os.path.abspath(self.brain_dir)
+        if not conv_path.startswith(brain_abs):
+            return False
+
         if os.path.isdir(conv_path):
             self.conversation_id = clean_id
             return True
-        # If passed without full UUID, try matching prefix
-        matches = [d for d in os.listdir(self.brain_dir) if d.startswith(clean_id)]
-        if len(matches) == 1:
-            self.conversation_id = matches[0]
-            return True
+        # If passed without full UUID, try matching prefix securely
+        if os.path.isdir(self.brain_dir):
+            matches = [d for d in os.listdir(self.brain_dir) if d.startswith(clean_id) and SAFE_CONV_ID_RE.match(d)]
+            if len(matches) == 1:
+                self.conversation_id = matches[0]
+                return True
         return False
 
     def _get_conversation_mtime(self, conv_path: str) -> float:
@@ -243,11 +256,12 @@ class AntigravityRunner:
     def get_session_turns(self, conv_id: Optional[str] = None, limit: int = 5) -> List[Dict[str, Any]]:
         """Extracts recent conversation turns (user requests and model responses) for a session."""
         target_id = conv_id or self.conversation_id or self._get_latest_conversation_id()
-        if not target_id:
+        if not target_id or not SAFE_CONV_ID_RE.match(target_id):
             return []
 
-        path = os.path.join(self.brain_dir, target_id, ".system_generated", "logs", "transcript.jsonl")
-        if not os.path.isfile(path):
+        path = os.path.abspath(os.path.join(self.brain_dir, target_id, ".system_generated", "logs", "transcript.jsonl"))
+        brain_abs = os.path.abspath(self.brain_dir)
+        if not path.startswith(brain_abs) or not os.path.isfile(path):
             return []
 
         turns = []
@@ -288,13 +302,14 @@ class AntigravityRunner:
         return turns[-limit:]
 
     def get_session_log_export(self, conv_id: Optional[str] = None, max_lines: int = 200) -> str:
-        """Generates a clean human-readable log export for a session."""
+        """Generates a clean human-readable log export for a session with path traversal guard and secret redaction."""
         target_id = conv_id or self.conversation_id or self._get_latest_conversation_id()
-        if not target_id:
+        if not target_id or not SAFE_CONV_ID_RE.match(target_id):
             return "No active or recorded session found."
 
-        path = os.path.join(self.brain_dir, target_id, ".system_generated", "logs", "transcript.jsonl")
-        if not os.path.isfile(path):
+        path = os.path.abspath(os.path.join(self.brain_dir, target_id, ".system_generated", "logs", "transcript.jsonl"))
+        brain_abs = os.path.abspath(self.brain_dir)
+        if not path.startswith(brain_abs) or not os.path.isfile(path):
             return f"Session transcript file not found for: {target_id}"
 
         output_lines = [
@@ -322,11 +337,12 @@ class AntigravityRunner:
                             clean = content
                             if "<USER_REQUEST>" in content:
                                 clean = content.split("<USER_REQUEST>")[1].split("</USER_REQUEST>")[0].strip()
-                            output_lines.append(f"[{ts}] USER: {clean}\n")
+                            clean_sanitized = sanitize_secrets(clean)
+                            output_lines.append(f"[{ts}] USER: {clean_sanitized}\n")
                         elif src == "MODEL" and rtype == "PLANNER_RESPONSE":
                             th = r.get("thinking", "")
                             if th and th.strip():
-                                first_th = th.strip().splitlines()[0][:90]
+                                first_th = sanitize_secrets(th.strip().splitlines()[0][:90])
                                 output_lines.append(f"[{ts}] ○ Thought: {first_th}")
                             for tc in r.get("tool_calls", []):
                                 tname = tc.get("name", "tool")
@@ -334,7 +350,8 @@ class AntigravityRunner:
                                 arg_keys = list(args.keys()) if isinstance(args, dict) else []
                                 output_lines.append(f"[{ts}] ● Tool: {tname}({arg_keys})")
                             if content and content.strip():
-                                output_lines.append(f"[{ts}] MODEL: {content.strip()[:200]}...\n")
+                                safe_content = sanitize_secrets(content.strip()[:200])
+                                output_lines.append(f"[{ts}] MODEL: {safe_content}...\n")
                     except Exception:
                         pass
         except Exception as e:
@@ -408,6 +425,7 @@ class AntigravityRunner:
                 env=os.environ.copy(),
             )
 
+            MAX_SAFE_OUTPUT_LINES = 20000
             async def read_stream():
                 assert self.current_process and self.current_process.stdout
                 while True:
@@ -415,7 +433,10 @@ class AntigravityRunner:
                     if not line:
                         break
                     decoded = line.decode("utf-8", errors="replace")
-                    full_output_lines.append(decoded)
+                    if len(full_output_lines) < MAX_SAFE_OUTPUT_LINES:
+                        full_output_lines.append(decoded)
+                    elif len(full_output_lines) == MAX_SAFE_OUTPUT_LINES:
+                        full_output_lines.append("\n[OUTPUT TRUNCATED: Reached safety buffer limit to protect host memory]\n")
                     if on_chunk:
                         try:
                             res = on_chunk(decoded)

@@ -31,15 +31,15 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `enable_autostart.bat` / `disable_autostart.bat`: 1-click Windows auto-start toggle scripts.
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs 47 verification tests, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.
-- `tests/` - Unit tests (50 passed):
+- `tests/` - Unit tests (53 passed):
   - `test_autostart.py`: Tests Windows Startup folder resolution, shortcut creation, enable/disable operations.
   - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, partial line race condition guards with byte offset rewind, and pause/resume live sync toggle.
   - `test_progress_tracker.py`: Tests Mode A (indeterminate), Mode B (activity-based), Mode C (determinate), monotonic non-decreasing progress, 95% cap rule, pytest line integration, and markup stripping in activities.
   - `test_workspace.py`: Tests interactive workspace browser cards, child folder buttons, and system drive selection menus.
   - `test_screenshot.py`: Tests screenshot capture, WinSta0 attachment, blank/transparent validation, JPEG downscale/compression optimization, and terminal snapshot rendering.
-  - `test_stream_manager.py`: Tests ANSI stripping, compact sliding terminal windowing, consecutive action deduplication/collapsing, 500ms buffer accumulation, ~1.0s periodic edits, completion events, HTML parse error plain-text fallbacks, and error/cancel events.
-  - `test_runner.py`: Tests runner initialization, relative/absolute workspace switching, folder creation, subdirectory inspection, parent directory retrieval, and session logs export.
-  - `test_formatter.py`: Tests Markdown-to-HTML conversion.
+  - `test_stream_manager.py`: Tests ANSI stripping, compact sliding terminal windowing, consecutive action deduplication/collapsing, 500ms buffer accumulation, ~1.0s periodic edits, completion events, HTML parse error plain-text fallbacks, buffer cap memory protection, and error/cancel events.
+  - `test_runner.py`: Tests runner initialization, relative/absolute workspace switching, folder creation, subdirectory inspection, parent directory retrieval, path traversal prevention, log secret redaction, and session logs export.
+  - `test_formatter.py`: Tests Markdown-to-HTML conversion, Telegram bot token redaction, and API key sanitization.
   - `test_injector.py`: Tests process detection, alphanumeric/symbol/space key event records, special keys (Yes/No/Select/Arrows/Ctrl+C), scan codes, and injection safety fallback.
 - `.tmp/` - Temporary files, recent workspaces ledger (`recent_workspaces.json`), and process run logs.
 - `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
@@ -70,6 +70,13 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `[ 🚀 Enable Auto-Start ]` / `[ 🛑 Disable Auto-Start ]`: 1-tap inline toggle in `/status`.
 - Double-click `setup\enable_autostart.bat` or `setup\disable_autostart.bat`.
 
+## Security Architecture & Defenses
+- Whitelist Authentication: Only numerical user IDs in `ALLOWED_TELEGRAM_USER_IDS` can execute commands, callbacks, or keystrokes.
+- Path Traversal Guard: Strict `[a-zA-Z0-9_\-]+` validation and `commonpath` checks prevent directory traversal in session IDs and log exports.
+- Automatic Secret Redaction: Telegram bot tokens (`[0-9]{8,12}:[a-zA-Z0-9_-]{34,38}`) and API keys (`sk-...`, `ghp_...`, `AIza...`) are automatically scrubbed from logs and chat outputs.
+- Process Injection Safety: Interactive console targeting strictly matches `agy.exe`/`antigravity.exe` binaries, rejecting arbitrary background processes.
+- Memory & Buffer Protection: Output stream and buffer caps prevent host memory exhaustion on runaway or infinite loop processes.
+
 ## Status & Next Steps
-- Status: Windows Auto-Start configured and enabled on laptop startup (runs silently in background via start_bot_silent.vbs). All 50 unit tests passing (100% success). Screenshot compression, streaming partial-line guards, HTML parse fallback, and strict UUID auto-attach applied. Daemon active and polling.
+- Status: Full security audit completed and defensive hardening applied. Windows Auto-Start configured and enabled on laptop startup. All 53 unit tests passing (100% success). Daemon active and polling.
 - Last updated: 2026-11-15.

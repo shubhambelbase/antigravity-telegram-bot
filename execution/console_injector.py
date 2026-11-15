@@ -8,6 +8,7 @@ and WriteConsoleInputW APIs with precision hardware scan codes and pacing.
 import ctypes
 from ctypes import wintypes
 import logging
+import os
 import sys
 import threading
 import time
@@ -101,13 +102,20 @@ class INPUT_RECORD(ctypes.Structure):
 
 
 def find_interactive_agy_pid() -> Optional[int]:
-    """Finds the PID of the most recently active interactive agy.exe process."""
+    """Finds the PID of the most recently active interactive agy.exe process strictly."""
     candidates = []
+    VALID_AGY_BINARIES = {"agy.exe", "agy", "antigravity.exe", "antigravity"}
     for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time", "status"]):
         try:
             name = (proc.info.get("name") or "").lower()
-            if "agy" in name or "antigravity" in name:
-                cmdline = proc.info.get("cmdline") or []
+            cmdline = proc.info.get("cmdline") or []
+
+            is_agy = name in VALID_AGY_BINARIES
+            if not is_agy and cmdline:
+                first_arg = os.path.basename(cmdline[0]).lower()
+                is_agy = first_arg in VALID_AGY_BINARIES
+
+            if is_agy:
                 # Exclude headless print mode and help invocations
                 if not any(arg in ["-p", "--print", "-h", "--help"] for arg in cmdline):
                     if proc.info.get("status") != psutil.STATUS_ZOMBIE:

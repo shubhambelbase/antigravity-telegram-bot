@@ -122,3 +122,48 @@ def test_runner_conversation_mtime_prioritizes_transcript(tmp_path):
     assert len(recents) == 2
     assert recents[0].conv_id == "conv-older-folder"
     assert recents[1].conv_id == "conv-newer-folder"
+
+
+def test_runner_path_traversal_prevention(tmp_path):
+    runner = AntigravityRunner()
+    runner.brain_dir = str(tmp_path)
+
+    # Malicious path traversal attempts
+    assert runner.set_conversation("../../../system32") is False
+    assert runner.set_conversation("..\\..\\windows") is False
+    assert runner.set_conversation("conv/with/slashes") is False
+    assert runner.set_conversation("conv;rm -rf") is False
+
+    logs_traversal = runner.get_session_log_export("../../../windows/system.ini")
+    assert "No active or recorded session" in logs_traversal
+
+    turns_traversal = runner.get_session_turns("../../../windows/system.ini")
+    assert turns_traversal == []
+
+
+def test_runner_log_export_sanitizes_secrets(tmp_path):
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    conv = brain / "sec-session-123"
+    conv.mkdir()
+    log_dir = conv / ".system_generated" / "logs"
+    log_dir.mkdir(parents=True)
+    transcript = log_dir / "transcript.jsonl"
+
+    import json
+    # Write record containing Telegram token
+    record = {
+        "step_index": 0,
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "content": "<USER_REQUEST>Connect to https://api.telegram.org/bot9876543210:ABCdefGhIJKlmNoPQRsTUVwxyZ12345678/getMe</USER_REQUEST>",
+        "created_at": "2026-11-15T12:00:00"
+    }
+    transcript.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    runner = AntigravityRunner()
+    runner.brain_dir = str(brain)
+
+    exported = runner.get_session_log_export("sec-session-123")
+    assert "9876543210:ABCdefGhIJKlmNoPQRsTUVwxyZ12345678" not in exported
+    assert "[REDACTED_TELEGRAM_TOKEN]" in exported

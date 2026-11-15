@@ -17,6 +17,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from execution.formatter import sanitize_secrets
 from execution.progress_tracker import AdaptiveProgressTracker, ProgressMode
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,8 @@ def format_terminal_window(raw: str, max_chars: int = 2800, max_lines: int = 8) 
     - Limits visible window to the most recent max_lines with a clear folding badge.
     """
     clean = strip_ansi(raw).replace("\r\n", "\n").replace("\r", "\n")
+    # Redact sensitive tokens and secrets from live output
+    clean = sanitize_secrets(clean)
     # Strip HTML markup tags (e.g. <code>, </i>) without destroying code generics like vector<int> or redirects
     clean = re.sub(r"</?(?:code|b|strong|em|pre|a|i)\b[^>]*>", "", clean)
     # Unescape html entities so code block displays natural symbols
@@ -129,6 +132,9 @@ class HybridStreamSession:
         if not chunk:
             return
         self._buffer.append(chunk)
+        # Cap buffer to 5,000 chunks to prevent memory exhaustion on runaway infinite loops
+        if len(self._buffer) > 5000:
+            self._buffer = self._buffer[-4000:]
         self._last_received_time = time.time()
         for line in chunk.splitlines():
             if line.strip():

@@ -44,7 +44,7 @@ from execution.console_injector import (
     inject_special_key,
     inject_text_to_agy,
 )
-from execution.formatter import markdown_to_telegram_html
+from execution.formatter import markdown_to_telegram_html, sanitize_secrets
 from execution.screenshot import get_screenshot
 from execution.stream_manager import TerminalStreamManager, collapse_consecutive_lines
 from execution.transcript_watcher import TranscriptWatcher
@@ -60,6 +60,26 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+
+
+class SecretRedactionFilter(logging.Filter):
+    """Filters out any Telegram bot token or API keys from logging outputs."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = sanitize_secrets(record.msg)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: sanitize_secrets(str(v)) if isinstance(v, str) else v for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(sanitize_secrets(str(a)) if isinstance(a, str) else a for a in record.args)
+        return True
+
+
+root_logger = logging.getLogger()
+root_logger.addFilter(SecretRedactionFilter())
+for _handler in root_logger.handlers:
+    _handler.addFilter(SecretRedactionFilter())
+
 logger = logging.getLogger(__name__)
 
 # Load environment
@@ -1173,7 +1193,8 @@ def check_single_instance() -> bool:
                 old_pid = int(f.read().strip())
             if psutil.pid_exists(old_pid):
                 proc = psutil.Process(old_pid)
-                if "python" in proc.name().lower():
+                cmdline = proc.cmdline() or []
+                if "python" in proc.name().lower() and any("telegram_bot" in arg.lower() for arg in cmdline):
                     logger.warning(f"Another instance is already running with PID {old_pid}. Exiting.")
                     return False
         except Exception:
