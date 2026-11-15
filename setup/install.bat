@@ -126,11 +126,12 @@ if exist ".venv\Scripts\python.exe" (
 )
 
 REM ----------------------------------------------------
-REM Step 3: Install Required Dependencies
+REM Step 3: Install Required Dependencies & CLI Entrypoint
 REM ----------------------------------------------------
 echo [*] Installing required Python dependencies into .venv...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip --quiet
 ".venv\Scripts\pip.exe" install -r requirements.txt --quiet
+".venv\Scripts\pip.exe" install -e . --quiet
 if errorlevel 1 (
     echo [ERROR] Failed to install packages from requirements.txt.
     pause
@@ -140,14 +141,14 @@ echo [OK] All dependencies successfully installed into isolated environment.
 echo.
 
 REM ----------------------------------------------------
-REM Step 4: Run Automated Verification Suite (39 Tests)
+REM Step 4: Run Automated Verification Suite (46 Tests)
 REM ----------------------------------------------------
 echo [*] Running automated self-tests to verify system compatibility...
 ".venv\Scripts\python.exe" -m pytest tests/ --quiet
 if errorlevel 1 (
     echo [WARNING] Some self-tests produced warnings. Check tests/ for details.
 ) else (
-    echo [OK] All 39 automated unit tests passed with 100%% success!
+    echo [OK] All 46 automated unit tests passed with 100%% success!
 )
 echo.
 
@@ -198,6 +199,7 @@ echo ====================================================
 echo   Installation Complete!
 echo ====================================================
 echo.
-echo To start your bot anytime, double-click: run_bot.bat
+echo To start your bot anytime, double-click: setup\run_bot.bat
+echo Or run: antigravity-bot
 echo.
 pause
