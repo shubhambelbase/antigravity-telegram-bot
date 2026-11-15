@@ -1,6 +1,7 @@
 """Screenshot capture utility for Windows desktop and terminal display.
 
-Supports physical desktop screen capture (via PIL ImageGrab / Win32)
+Supports physical desktop screen capture (via WinSta0 desktop attachment,
+PIL ImageGrab, and Win32 GDI BitBlt) with blank/transparency validation
 and high-fidelity terminal window image rendering fallback.
 """
 
@@ -15,22 +16,184 @@ from PIL import Image, ImageDraw
 logger = logging.getLogger(__name__)
 
 
+def ensure_desktop_access() -> bool:
+    """Attaches current process and thread to WinSta0 (interactive window station) and default desktop."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        # WINSTA_ALL_ACCESS = 0x0000037F
+        hwinsta = user32.OpenWindowStationW("WinSta0", False, 0x0000037F)
+        if hwinsta:
+            user32.SetProcessWindowStation(hwinsta)
+        # DESKTOP_ALL_ACCESS = 0x01FF
+        hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to attach to WinSta0 desktop: {e}")
+        return False
+
+
+def is_blank_or_invalid_image(img: Optional[Image.Image]) -> bool:
+    """Checks whether an image is completely transparent, single solid color (e.g. solid white/black), or invalid."""
+    if img is None or img.width <= 1 or img.height <= 1:
+        return True
+
+    # Check for complete transparency
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        try:
+            extrema = img.getextrema()
+            if img.mode == "RGBA":
+                alpha_extrema = extrema[3]
+                if alpha_extrema[1] == 0:  # Max alpha is 0 => completely transparent
+                    return True
+        except Exception:
+            pass
+
+    # Check for solid single-color images (e.g. solid white or solid black)
+    try:
+        rgb = img.convert("RGB")
+        colors = rgb.getcolors(maxcolors=2)
+        if colors is not None and len(colors) == 1:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def capture_win32_gdi() -> Optional[Image.Image]:
+    """Captures the virtual or primary desktop screen via Win32 GDI BitBlt."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        # Attach to interactive desktop station
+        ensure_desktop_access()
+
+        # Query virtual screen coordinates
+        left = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        top = user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
+        width = user32.GetSystemMetrics(78) # SM_CXVIRTUALSCREEN
+        height = user32.GetSystemMetrics(79)# SM_CYVIRTUALSCREEN
+
+        if width <= 0 or height <= 0:
+            left = 0
+            top = 0
+            width = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+            height = user32.GetSystemMetrics(1) # SM_CYSCREEN
+
+        if width <= 0 or height <= 0:
+            return None
+
+        hdesktop_dc = user32.GetDC(0)
+        if not hdesktop_dc:
+            return None
+
+        try:
+            hmem_dc = gdi32.CreateCompatibleDC(hdesktop_dc)
+            if not hmem_dc:
+                return None
+
+            hbitmap = gdi32.CreateCompatibleBitmap(hdesktop_dc, width, height)
+            if not hbitmap:
+                gdi32.DeleteDC(hmem_dc)
+                return None
+
+            hold_bmp = gdi32.SelectObject(hmem_dc, hbitmap)
+            raster_op = 0x00CC0020  # SRCCOPY
+            success = gdi32.BitBlt(hmem_dc, 0, 0, width, height, hdesktop_dc, left, top, raster_op)
+            if not success:
+                gdi32.SelectObject(hmem_dc, hold_bmp)
+                gdi32.DeleteObject(hbitmap)
+                gdi32.DeleteDC(hmem_dc)
+                return None
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", wintypes.DWORD),
+                    ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD),
+                ]
+
+            bmi = BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.biWidth = width
+            bmi.biHeight = -height  # top-down DIB
+            bmi.biPlanes = 1
+            bmi.biBitCount = 32
+            bmi.biCompression = 0   # BI_RGB
+
+            buf_size = width * height * 4
+            buffer = ctypes.create_string_buffer(buf_size)
+            res = gdi32.GetDIBits(hmem_dc, hbitmap, 0, height, buffer, ctypes.byref(bmi), 0)
+
+            # Cleanup GDI handles
+            gdi32.SelectObject(hmem_dc, hold_bmp)
+            gdi32.DeleteObject(hbitmap)
+            gdi32.DeleteDC(hmem_dc)
+
+            if res == 0:
+                return None
+
+            img = Image.frombuffer("RGBA", (width, height), buffer, "raw", "BGRA", 0, 1)
+            return img.convert("RGB")
+        finally:
+            user32.ReleaseDC(0, hdesktop_dc)
+    except Exception as e:
+        logger.debug(f"Win32 BitBlt capture failed: {e}")
+        return None
+
+
 def capture_desktop_screenshot() -> Optional[bytes]:
-    """Attempts to capture the physical desktop screen using PIL or PowerShell."""
-    # Method 1: PIL ImageGrab (works in interactive user sessions)
+    """Attempts to capture physical desktop screen with blank/transparency validation."""
+    ensure_desktop_access()
+
+    # Method 1: PIL ImageGrab (with WinSta0 attachment)
     try:
         from PIL import ImageGrab
-        img = ImageGrab.grab(all_screens=True)
-        if img:
+        img = None
+        try:
+            img = ImageGrab.grab(all_screens=True)
+        except Exception:
+            img = ImageGrab.grab()
+
+        if img and not is_blank_or_invalid_image(img):
             buf = io.BytesIO()
-            img.save(buf, format="PNG")
+            img.convert("RGB").save(buf, format="PNG")
             return buf.getvalue()
     except Exception as e:
-        logger.debug(f"PIL ImageGrab not available in current session: {e}")
+        logger.debug(f"PIL ImageGrab not available or blank: {e}")
 
-    # Method 2: PowerShell Graphics.CopyFromScreen
+    # Method 2: Win32 GDI BitBlt capture
+    try:
+        win_img = capture_win32_gdi()
+        if win_img and not is_blank_or_invalid_image(win_img):
+            buf = io.BytesIO()
+            win_img.save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception as e:
+        logger.debug(f"Win32 GDI capture failed or blank: {e}")
+
+    # Method 3: PowerShell CopyFromScreen (with strict ErrorAction and validation)
     try:
         ps_code = (
+            "$ErrorActionPreference = 'Stop'; "
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
             "$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
             "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; "
@@ -49,9 +212,12 @@ def capture_desktop_screenshot() -> Optional[bytes]:
         )
         if res.returncode == 0 and res.stdout.strip():
             raw_b64 = res.stdout.strip()
-            return base64.b64decode(raw_b64)
+            data = base64.b64decode(raw_b64)
+            ps_img = Image.open(io.BytesIO(data))
+            if not is_blank_or_invalid_image(ps_img):
+                return data
     except Exception as e:
-        logger.debug(f"PowerShell screen copy failed: {e}")
+        logger.debug(f"PowerShell screen copy failed or blank: {e}")
 
     return None
 

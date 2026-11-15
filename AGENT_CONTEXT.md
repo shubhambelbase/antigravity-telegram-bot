@@ -1,7 +1,7 @@
 # Project Context: Antigravity Telegram Bot
 
 ## Overview
-A lightweight, reliable, autonomous Telegram remote control center for Google Antigravity CLI (`agy`). Features real-time CLI connection detection, normal command execution, interactive prompts (Yes / No / Select / Navigation keys), live hybrid streaming output with 1-second edits, and full session history / logs inspection.
+A lightweight, reliable, autonomous Telegram remote control center for Google Antigravity CLI (`agy`). Features real-time CLI connection detection, normal command execution, interactive prompts (Yes / No / Select / Navigation keys), live hybrid streaming output with 1-second edits, desktop screen snapshotting with WinSta0 desktop attachment, and full session history / logs inspection.
 
 ## Stack & Environment
 - **OS**: Windows
@@ -14,7 +14,7 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `antigravity_telegram_bridge.md`: Execution rules, timeouts, safety protocols.
 - `execution/` - Core Python services:
   - `console_injector.py`: Win32 `AttachConsole`, `VkKeyScanW`, `MapVirtualKeyW`, and `WriteConsoleInputW` injector typing normal prompts and interactive keys (Yes/No/Select/Arrows/Ctrl+C).
-  - `screenshot.py`: Desktop screen capture utility (PIL ImageGrab / PowerShell) and high-fidelity dark-mode terminal window snapshot renderer.
+  - `screenshot.py`: Desktop screen capture utility (WinSta0 / desktop attachment, PIL ImageGrab, Win32 GDI BitBlt) with blank/transparency validation (`is_blank_or_invalid_image`) and high-fidelity dark-mode terminal window snapshot renderer fallback.
   - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Maintains persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, and separate event notifications for completions/errors.
   - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, and extracting tool calls/thoughts.
   - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), non-zero return code failure tracking, and logs export (`get_session_log_export`).
@@ -23,8 +23,8 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `setup/` - Automated setup & guides:
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs test suite, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Complete step-by-step documentation for users cloning the repo.
-- `tests/` - Unit tests (26 passed):
-  - `test_screenshot.py`: Tests screenshot capture and terminal snapshot rendering.
+- `tests/` - Unit tests (29 passed):
+  - `test_screenshot.py`: Tests screenshot capture, WinSta0 attachment, blank/transparent validation, and terminal snapshot rendering.
   - `test_stream_manager.py`: Tests ANSI stripping, terminal windowing, 500ms buffer accumulation, ~1.0s periodic edits, completion events, error/cancel events.
   - `test_runner.py`: Tests runner initialization, workspace switching, session resets, conversation discovery, turn extraction, and log export.
   - `test_formatter.py`: Tests Markdown-to-HTML conversion.
@@ -46,5 +46,5 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `[ 🛑 Ctrl+C ]` `[ ⌫ Backspace ]` `[ 📸 Screenshot ]`
 
 ## Status & Next Steps
-- Status: Full codebase bug audit and fixes applied (callback query message resolution, HTML escaping in tool bullets, non-zero return code detection, auto-tracking initial watcher fallback). 26 unit tests passing (100% success). Daemon active.
+- Status: Fixed blank white screenshot issue via WinSta0/default desktop attachment, Win32 GDI BitBlt capture, and pixel blank/transparency validation fallback. All 29 unit tests passing (100% success). Daemon active and polling.
 - Last updated: 2026-11-15.
