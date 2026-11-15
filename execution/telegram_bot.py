@@ -1108,12 +1108,17 @@ async def post_init(application: Application):
     async def on_pc_user(conv_id: str, prompt: str):
         for user_id in ALLOWED_USER_IDS:
             try:
-                await stream_manager.start_session(
-                    chat_id=user_id,
-                    title="Antigravity PC Screen Session",
-                    initial_status="User Input Detected",
-                    initial_prompt=prompt,
-                )
+                session = stream_manager.get_session(user_id)
+                if session and session.is_active:
+                    session._status = "Working..."
+                    session.progress.operation_title = prompt
+                else:
+                    await stream_manager.start_session(
+                        chat_id=user_id,
+                        title="Antigravity PC Screen Session",
+                        initial_status="User Input Detected",
+                        initial_prompt=prompt,
+                    )
             except Exception as e:
                 logger.warning(f"Failed to initialize PC stream session: {e}")
 

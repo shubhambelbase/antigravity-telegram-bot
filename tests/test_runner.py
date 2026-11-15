@@ -84,3 +84,41 @@ def test_runner_get_session_turns_and_logs(tmp_path):
 
     logs = runner.get_session_log_export("fake-uuid-not-exist")
     assert "not found" in logs.lower()
+
+
+def test_runner_conversation_mtime_prioritizes_transcript(tmp_path):
+    brain = tmp_path / "brain"
+    brain.mkdir()
+
+    # Old folder with brand new transcript
+    conv1 = brain / "conv-older-folder"
+    conv1.mkdir()
+    t1_dir = conv1 / ".system_generated" / "logs"
+    t1_dir.mkdir(parents=True)
+    t1_file = t1_dir / "transcript.jsonl"
+    t1_file.write_text('{"step_index": 0}\n', encoding="utf-8")
+
+    # Newer folder with older transcript
+    conv2 = brain / "conv-newer-folder"
+    conv2.mkdir()
+    t2_dir = conv2 / ".system_generated" / "logs"
+    t2_dir.mkdir(parents=True)
+    t2_file = t2_dir / "transcript.jsonl"
+    t2_file.write_text('{"step_index": 0}\n', encoding="utf-8")
+
+    # Set explicit timestamps: conv1 transcript is newest (t=2000), conv2 folder is newer (t=1500)
+    os.utime(t2_file, (1000, 1000))
+    os.utime(conv2, (1500, 1500))
+    os.utime(conv1, (500, 500))
+    os.utime(t1_file, (2000, 2000))
+
+    runner = AntigravityRunner()
+    runner.brain_dir = str(brain)
+
+    latest = runner._get_latest_conversation_id()
+    assert latest == "conv-older-folder"
+
+    recents = runner.get_recent_conversations(limit=2)
+    assert len(recents) == 2
+    assert recents[0].conv_id == "conv-older-folder"
+    assert recents[1].conv_id == "conv-newer-folder"

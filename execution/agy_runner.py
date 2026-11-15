@@ -188,19 +188,36 @@ class AntigravityRunner:
             return True
         return False
 
+    def _get_conversation_mtime(self, conv_path: str) -> float:
+        """Returns the latest modification time of transcript.jsonl or the conversation directory.
+        
+        Essential on Windows/NTFS where writing to nested transcript.jsonl does not update
+        the timestamp of the grandparent session directory.
+        """
+        transcript_path = os.path.join(conv_path, ".system_generated", "logs", "transcript.jsonl")
+        if os.path.isfile(transcript_path):
+            try:
+                return os.path.getmtime(transcript_path)
+            except OSError:
+                pass
+        try:
+            return os.path.getmtime(conv_path)
+        except OSError:
+            return 0.0
+
     def get_recent_conversations(self, limit: int = 5) -> List[ConversationInfo]:
         """Scans the Antigravity brain directory and returns recent conversations."""
         if not os.path.isdir(self.brain_dir):
             return []
 
-        conv_dirs = glob.glob(os.path.join(self.brain_dir, "*"))
-        # Sort by modification time descending
-        conv_dirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        conv_dirs = [d for d in glob.glob(os.path.join(self.brain_dir, "*")) if os.path.isdir(d)]
+        # Sort by modification time of transcript.jsonl (or folder) descending
+        conv_dirs.sort(key=self._get_conversation_mtime, reverse=True)
 
         results: List[ConversationInfo] = []
         for d in conv_dirs[:limit]:
             conv_id = os.path.basename(d)
-            mtime = os.path.getmtime(d)
+            mtime = self._get_conversation_mtime(d)
             dt_str = datetime.fromtimestamp(mtime).strftime("%b %d %I:%M %p")
 
             preview = "(Empty or new session)"
@@ -329,10 +346,10 @@ class AntigravityRunner:
         """Returns the ID of the most recently modified conversation in brain."""
         if not os.path.isdir(self.brain_dir):
             return None
-        dirs = glob.glob(os.path.join(self.brain_dir, "*"))
+        dirs = [d for d in glob.glob(os.path.join(self.brain_dir, "*")) if os.path.isdir(d)]
         if not dirs:
             return None
-        dirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        dirs.sort(key=self._get_conversation_mtime, reverse=True)
         return os.path.basename(dirs[0])
 
     async def cancel(self) -> bool:

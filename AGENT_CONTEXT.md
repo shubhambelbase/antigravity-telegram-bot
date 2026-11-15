@@ -18,13 +18,13 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `screenshot.py`: Desktop screen capture utility (WinSta0 / desktop attachment, PIL ImageGrab, Win32 GDI BitBlt) with blank/transparency validation (`is_blank_or_invalid_image`) and high-fidelity dark-mode terminal window snapshot renderer fallback.
   - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Embeds the Adaptive Progress Dashboard into the persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, consecutive line deduplication (`collapse_consecutive_lines`), compact sliding 8-line windowing (`format_terminal_window`), and separate event notifications for completions/errors.
   - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, extracting tool calls/thoughts, and pausable live sync mirror (`pause()`/`resume()`).
-  - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), workspace resolution, subdirectory listing, parent tracking, system drive discovery, and recent workspaces history.
-  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), live sync control (`/sync`, `/mute`, `sync:toggle`), `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
+  - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), workspace resolution, subdirectory listing, parent tracking, system drive discovery, recent workspaces history, and transcript modification time resolver (`_get_conversation_mtime`) fixing Windows/NTFS folder timestamp inertia.
+  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), live sync control (`/sync`, `/mute`, `sync:toggle`), session reuse in `on_pc_user`, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
 - `setup/` - Automated setup & guides:
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements including pytest, runs 40 verification tests with 100% success, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.
-- `tests/` - Unit tests (43 passed):
+- `tests/` - Unit tests (44 passed):
   - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, and pause/resume live sync toggle.
   - `test_progress_tracker.py`: Tests Mode A (indeterminate), Mode B (activity-based), Mode C (determinate), monotonic non-decreasing progress, 95% cap rule, pytest line integration, and markup stripping in activities.
   - `test_workspace.py`: Tests interactive workspace browser cards, child folder buttons, and system drive selection menus.
@@ -59,5 +59,5 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `/mkdir <path>`: Creates a directory and immediately switches workspace into it.
 
 ## Status & Next Steps
-- Status: Live terminal compaction (sliding 8-line window, consecutive action deduplication `(xN)`, clean tag stripping) implemented. All 43 unit tests passing (100% success). Daemon active and polling.
+- Status: Fixed Windows NTFS directory timestamp inertia by prioritizing nested transcript.jsonl mtimes; session reuse prevents duplicate prompt messages. All 44 unit tests passing (100% success). Daemon active and polling.
 - Last updated: 2026-11-15.
