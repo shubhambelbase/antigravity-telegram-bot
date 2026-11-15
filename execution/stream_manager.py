@@ -113,6 +113,8 @@ class HybridStreamSession:
         self.message_id: Optional[int] = None
         self._buffer: List[str] = []
         self._skeleton_step: int = 0
+        self.has_real_output: bool = False
+        self.header_info: Optional[str] = None
         self._last_received_time: float = 0.0
         self._last_edit_time: float = 0.0
         self._last_rendered_text: str = ""
@@ -124,6 +126,10 @@ class HybridStreamSession:
     @property
     def is_active(self) -> bool:
         return self._is_active
+
+    def set_header_info(self, text: str):
+        """Sets informational header text (e.g. desktop prompt injection target) without marking has_real_output."""
+        self.header_info = text
 
     def get_full_buffer_text(self) -> str:
         return "".join(self._buffer)
@@ -138,8 +144,13 @@ class HybridStreamSession:
             self._buffer = self._buffer[-4000:]
         self._last_received_time = time.time()
         for line in chunk.splitlines():
-            if line.strip():
+            sline = line.strip()
+            if sline:
                 self.progress.feed_line(line)
+                if not self.has_real_output:
+                    # Ignore mere initial waiting status strings if any
+                    if not any(ign in sline.lower() for ign in ["waiting for live", "injecting prompt"]):
+                        self.has_real_output = True
 
     def _render_skeleton_terminal(self) -> str:
         """Renders an animated shimmering skeleton placeholder while waiting for terminal output."""
@@ -172,17 +183,23 @@ class HybridStreamSession:
 
     def _render_current_view(self, status: Optional[str] = None) -> str:
         current_status = status or self._status
-        raw_text = self.get_full_buffer_text()
-        terminal_view = format_terminal_window(raw_text, max_chars=2800)
         dashboard = self.progress.render_dashboard(status=current_status)
 
-        if terminal_view.strip():
-            escaped_code = html.escape(terminal_view)
-            return f"{dashboard}\n\n<pre><code class=\"language-bash\">{escaped_code}</code></pre>"
-        else:
-            skeleton = self._render_skeleton_terminal()
-            escaped_skeleton = html.escape(skeleton)
-            return f"{dashboard}\n\n<pre><code class=\"language-bash\">{escaped_skeleton}</code></pre>"
+        header_block = ""
+        if self.header_info:
+            header_block = f"<blockquote>{self.header_info}</blockquote>\n\n"
+
+        if self.has_real_output:
+            raw_text = self.get_full_buffer_text()
+            terminal_view = format_terminal_window(raw_text, max_chars=2800)
+            if terminal_view.strip():
+                escaped_code = html.escape(terminal_view)
+                return f"{dashboard}\n\n{header_block}<pre><code class=\"language-bash\">{escaped_code}</code></pre>"
+
+        # In loading / initial phase before real output arrives: render animated skeleton terminal!
+        skeleton = self._render_skeleton_terminal()
+        escaped_skeleton = html.escape(skeleton)
+        return f"{dashboard}\n\n{header_block}<pre><code class=\"language-bash\">{escaped_skeleton}</code></pre>"
 
     async def start(self, initial_status: str = "Initializing...", initial_prompt: Optional[str] = None) -> Optional[int]:
         """Lifecycle Step 1: Send initial persistent message and start 1s flush loop."""
@@ -218,14 +235,14 @@ class HybridStreamSession:
                 await asyncio.sleep(0.1)
                 now = time.time()
 
-                # Check if edit interval (1.0s) has elapsed
-                if now - self._last_edit_time < self.edit_interval:
+                # Animate skeleton loader and spinner while loading (before real terminal output arrives)
+                if not self.has_real_output:
+                    if now - self._last_edit_time >= 1.0:
+                        await self._edit_live_message()
                     continue
 
-                if not self._buffer:
-                    # Animate skeleton loader and spinner while loading (before initial terminal output)
-                    if now - self._last_edit_time >= 1.2:
-                        await self._edit_live_message()
+                # Check if edit interval (1.0s) has elapsed
+                if now - self._last_edit_time < self.edit_interval:
                     continue
 
                 # Check if buffer has received data and accumulated for debounce time (500ms),

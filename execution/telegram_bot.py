@@ -44,6 +44,7 @@ from execution.console_injector import (
     find_interactive_agy_pid,
     inject_special_key,
     inject_text_to_agy,
+    list_interactive_agy_processes,
 )
 from execution.formatter import markdown_to_telegram_html, sanitize_secrets
 from execution.screenshot import get_screenshot
@@ -217,7 +218,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await check_auth(update)
         return
 
-    interactive_pid = find_interactive_agy_pid()
+    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless Runner"
     conv_text = f"<code>{runner.conversation_id[:8]}...</code>" if runner.conversation_id else "Auto-Tracking"
 
@@ -279,7 +280,7 @@ async def cmd_controls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    interactive_pid = find_interactive_agy_pid()
+    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     status_text = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless"
 
     msg = (
@@ -306,13 +307,29 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    from execution.console_injector import get_workspace_for_conversation
+    active_procs = list_interactive_agy_processes()
+    active_pids: Dict[str, int] = {}
+    for ap in active_procs:
+        if ap.get("conv_id"):
+            active_pids[ap["conv_id"]] = ap["pid"]
+
     lines = ["📜 <b>Antigravity Session History:</b>\n"]
     keyboard = []
 
     for idx, s in enumerate(recents, 1):
         is_active = " <b>[ACTIVE]</b>" if runner.conversation_id == s.conv_id else ""
+        live_pid = active_pids.get(s.conv_id)
+        if not live_pid:
+            ws = get_workspace_for_conversation(s.conv_id)
+            if ws:
+                for ap in active_procs:
+                    if ap.get("cwd") and (ap["cwd"].lower() == ws.lower()):
+                        live_pid = ap["pid"]
+                        break
+        live_badge = f" 🖥️ <i>(Live PID {live_pid})</i>" if live_pid else ""
         lines.append(
-            f"<b>{idx}.</b> <code>{s.conv_id[:8]}...</code> ({s.updated_at}){is_active}\n"
+            f"<b>{idx}.</b> <code>{s.conv_id[:8]}...</code> ({s.updated_at}){is_active}{live_badge}\n"
             f"   <i>\"{html.escape(s.preview)}\"</i>\n"
         )
         attach_label = f"✅ Active #{idx}" if runner.conversation_id == s.conv_id else f"🔗 Attach #{idx}"
@@ -416,7 +433,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await cmd_screenshot(update, context)
             return
 
-        ok = inject_special_key(key_name)
+        target_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
+        ok = inject_special_key(key_name, pid=target_pid)
         if ok:
             await query.answer(f"Sent: {key_name.upper()}")
         else:
@@ -429,9 +447,17 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         conv_id = data.split("attach:", 1)[1]
         if runner.set_conversation(conv_id):
             await query.edit_message_reply_markup(reply_markup=None)
+            target_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
+            target_info = (
+                f"🖥️ <b>Desktop Terminal:</b> Live PID {target_pid}\n"
+                if target_pid
+                else "⚪ <b>Mode:</b> Headless Autonomous Runner\n"
+            )
             await query.message.reply_text(
-                f"🔗 <b>Attached to Session:</b> <code>{html.escape(conv_id)}</code>\n\n"
-                f"Your future messages and live PC terminal activity are now synchronized with this conversation!",
+                f"🔗 <b>Attached to Session:</b>\n<code>{html.escape(conv_id)}</code>\n\n"
+                f"📁 <b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
+                f"{target_info}\n"
+                f"Your messages and controls are now directed exclusively to this session!",
                 parse_mode=ParseMode.HTML,
                 reply_markup=QUICK_ACTION_KEYBOARD,
             )
@@ -723,7 +749,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mem = psutil.virtual_memory()
     agent_state = "🟡 Running" if runner.is_running else "🟢 Idle"
     conv_text = f"<code>{runner.conversation_id}</code>" if runner.conversation_id else "Auto-Continuous"
-    interactive_pid = find_interactive_agy_pid()
+    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless (No active terminal)"
 
     watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
@@ -781,7 +807,7 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        interactive_pid = find_interactive_agy_pid()
+        interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
         title = f"Antigravity Terminal (PID {interactive_pid})" if interactive_pid else "Antigravity Console"
         img_bytes, caption = get_screenshot(fallback_terminal_text=active_terminal_text, title=title)
 
@@ -1001,7 +1027,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await session.cancel()
 
     # Also attempt sending Ctrl+C into open interactive terminal
-    interactive_pid = find_interactive_agy_pid()
+    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     injected_stop = False
     if interactive_pid:
         injected_stop = inject_special_key("ctrl_c", pid=interactive_pid)
@@ -1115,27 +1141,26 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-    # 3. Check if an interactive terminal window is open on desktop
-    interactive_pid = find_interactive_agy_pid()
+    # 3. Check if an interactive terminal window is open on desktop for the target session or workspace
+    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     if interactive_pid and stream_manager:
+        session_title = f"Antigravity Live PC Screen (PID {interactive_pid})"
         session = await stream_manager.start_session(
             chat_id=chat_id,
-            title="Antigravity Live PC Screen",
+            title=session_title,
             initial_status="Injecting Prompt...",
             initial_prompt=user_prompt,
         )
         injected = inject_text_to_agy(user_prompt, pid=interactive_pid)
         if injected:
-            session.feed(
-                f"Prompt injected to desktop terminal PID {interactive_pid}:\n"
-                f"> {user_prompt}\n\n"
-                f"Waiting for live tool execution logs...\n"
+            session.set_header_info(
+                f"<b>Injected to Desktop Terminal (PID {interactive_pid}):</b>\n"
+                f"&gt; <i>{html.escape(user_prompt)}</i>"
             )
             return
         else:
-            session.feed(
-                f"⚠️ Direct console injection failed on PID {interactive_pid}.\n"
-                f"Automatically falling back to autonomous runner...\n\n"
+            session.set_header_info(
+                f"⚠️ <b>Direct injection failed on PID {interactive_pid}.</b> Falling back to autonomous runner..."
             )
 
     # 4. Headless execution fallback

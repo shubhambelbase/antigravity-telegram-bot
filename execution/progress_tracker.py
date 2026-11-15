@@ -95,6 +95,17 @@ class AdaptiveProgressTracker:
                 chars[idx] = ch
         return "".join(chars)
 
+    def _render_skeleton_activity(self, width: int = 12) -> str:
+        """Renders an animated shimmering wave specifically for activity loading lines."""
+        chars = ["░"] * width
+        wave = ["▒", "▓", "█", "▓", "▒"]
+        pos = (self._skeleton_tick + 4) % (width + len(wave)) - len(wave)
+        for i, ch in enumerate(wave):
+            idx = pos + i
+            if 0 <= idx < width:
+                chars[idx] = ch
+        return "".join(chars)
+
     def _add_activity(self, text: str):
         """Adds a clean distinct activity to the current activity list, stripping any raw markup."""
         clean = re.sub(r"</?(?:code|b|strong|em|pre|a|i)\b[^>]*>", "", text).strip()
@@ -327,9 +338,14 @@ class AdaptiveProgressTracker:
         lines.append("")
         lines.append("<b>Current activity:</b>")
 
-        display_acts = self.activities if self.activities else ["Initializing environment and analyzing prompt"]
-        for act in display_acts:
-            lines.append(f"• {html.escape(act)}")
+        if self.activities:
+            for act in self.activities:
+                lines.append(f"• {html.escape(act)}")
+        elif not self._is_completed:
+            skel_act = self._render_skeleton_activity(width=12)
+            lines.append(f"• <code>[{skel_act}]</code> <i>Analyzing prompt and initializing tools...</i>")
+        else:
+            lines.append("• <i>No recorded activities</i>")
 
         if not self._is_completed:
             lines.append("<i>Task count unknown · More work may be discovered</i>")

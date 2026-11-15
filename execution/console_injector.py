@@ -7,12 +7,14 @@ and WriteConsoleInputW APIs with precision hardware scan codes and pacing.
 
 import ctypes
 from ctypes import wintypes
+import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 import psutil
 
 logger = logging.getLogger(__name__)
@@ -101,9 +103,55 @@ class INPUT_RECORD(ctypes.Structure):
     ]
 
 
-def find_interactive_agy_pid() -> Optional[int]:
-    """Finds the PID of the most recently active interactive agy.exe process strictly."""
-    candidates = []
+CONV_DB_RE = re.compile(r"conversations[\\/]([a-f0-9\-]{36})\.db", re.IGNORECASE)
+
+
+def get_agy_process_conv_id(proc: psutil.Process) -> Optional[str]:
+    """Inspects a process memory maps and open files to identify its active conversation UUID."""
+    try:
+        for m in proc.memory_maps():
+            match = CONV_DB_RE.search(m.path)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    try:
+        for f in proc.open_files():
+            match = CONV_DB_RE.search(f.path)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def get_workspace_for_conversation(conv_id: str) -> Optional[str]:
+    """Looks up the workspace directory associated with a conversation UUID from history.jsonl."""
+    history_path = os.path.expanduser("~/.gemini/antigravity-cli/history.jsonl")
+    if not os.path.isfile(history_path):
+        return None
+    try:
+        with open(history_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("conversationId") == conv_id:
+                    ws = entry.get("workspace")
+                    if ws and os.path.isdir(ws):
+                        return ws
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"Error reading history.jsonl: {e}")
+    return None
+
+
+def list_interactive_agy_processes() -> List[Dict[str, Any]]:
+    """Lists all running interactive agy processes with their PID, conversation ID, and workspace."""
+    results = []
     VALID_AGY_BINARIES = {"agy.exe", "agy", "antigravity.exe", "antigravity"}
     for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time", "status"]):
         try:
@@ -119,16 +167,85 @@ def find_interactive_agy_pid() -> Optional[int]:
                 # Exclude headless print mode and help invocations
                 if not any(arg in ["-p", "--print", "-h", "--help"] for arg in cmdline):
                     if proc.info.get("status") != psutil.STATUS_ZOMBIE:
-                        candidates.append(proc)
+                        try:
+                            cwd = proc.cwd()
+                        except Exception:
+                            cwd = ""
+                        conv_id = get_agy_process_conv_id(proc)
+                        results.append({
+                            "pid": proc.info["pid"],
+                            "proc": proc,
+                            "cwd": cwd,
+                            "conv_id": conv_id,
+                            "create_time": proc.info.get("create_time", 0.0),
+                        })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
-    if not candidates:
+    results.sort(key=lambda x: x["create_time"], reverse=True)
+    return results
+
+
+def find_interactive_agy_pid(
+    conv_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> Optional[int]:
+    """Finds the PID of the interactive agy.exe process matching the requested session or workspace.
+
+    1. If conv_id is provided:
+       - Matches process whose open memory map contains conversations/<conv_id>.db.
+       - If no direct memory map match, matches process whose cwd matches the workspace of conv_id.
+       - Returns None if conv_id was explicitly requested but no matching interactive terminal is open.
+    2. If workspace is provided:
+       - Matches process whose cwd matches workspace.
+    3. If neither is provided:
+       - Returns the most recently launched candidate.
+    """
+    raw_candidates = list_interactive_agy_processes()
+    if not raw_candidates:
+        return None
+    candidates = sorted(raw_candidates, key=lambda x: x.get("create_time", 0.0), reverse=True)
+
+    # Step 1: Match by conversation ID if requested
+    if conv_id:
+        clean_conv = conv_id.strip()
+        # Direct session database match
+        for cand in candidates:
+            if cand["conv_id"] and (cand["conv_id"] == clean_conv or cand["conv_id"].startswith(clean_conv)):
+                return cand["pid"]
+
+        # Fallback to workspace of this conversation
+        conv_ws = get_workspace_for_conversation(clean_conv)
+        if conv_ws:
+            for cand in candidates:
+                cand_cwd = cand["cwd"]
+                if cand_cwd:
+                    try:
+                        if os.path.samefile(cand_cwd, conv_ws):
+                            return cand["pid"]
+                    except Exception:
+                        if cand_cwd.lower() == conv_ws.lower():
+                            return cand["pid"]
+
+        # An explicit conversation was requested, but it is NOT running in any interactive desktop window!
+        # Return None to prevent hijacking an unrelated desktop window.
         return None
 
-    # Pick the most recently launched candidate (highest create_time)
-    candidates.sort(key=lambda p: p.info.get("create_time", 0.0), reverse=True)
-    return candidates[0].info["pid"]
+    # Step 2: Match by workspace if provided
+    if workspace:
+        clean_ws = os.path.abspath(workspace)
+        for cand in candidates:
+            cand_cwd = cand["cwd"]
+            if cand_cwd:
+                try:
+                    if os.path.samefile(cand_cwd, clean_ws):
+                        return cand["pid"]
+                except Exception:
+                    if cand_cwd.lower() == clean_ws.lower():
+                        return cand["pid"]
+
+    # Step 3: Default to most recently launched candidate
+    return candidates[0]["pid"]
 
 
 def _get_input_records_for_char(ch: str):
@@ -228,11 +345,16 @@ def _build_char_records(ch: str):
     return pairs[0]
 
 
-def inject_text_to_agy(text: str, pid: Optional[int] = None) -> bool:
+def inject_text_to_agy(
+    text: str,
+    pid: Optional[int] = None,
+    conv_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> bool:
     """Injects text + Enter into the interactive agy console window with robust pacing.
     Guarantees that console is detached BEFORE any logging so bot logs never leak into target terminal.
     """
-    target_pid = pid or find_interactive_agy_pid()
+    target_pid = pid or find_interactive_agy_pid(conv_id=conv_id, workspace=workspace)
     if not target_pid:
         logger.warning("No interactive agy process found.")
         return False
@@ -352,9 +474,14 @@ def inject_text_to_agy(text: str, pid: Optional[int] = None) -> bool:
         return False
 
 
-def inject_special_key(key_name: str, pid: Optional[int] = None) -> bool:
+def inject_special_key(
+    key_name: str,
+    pid: Optional[int] = None,
+    conv_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> bool:
     """Injects interactive navigation/prompt keys like 'yes', 'no', 'enter', 'up', 'down', 'space', '1', '2', 'ctrl_c'."""
-    target_pid = pid or find_interactive_agy_pid()
+    target_pid = pid or find_interactive_agy_pid(conv_id=conv_id, workspace=workspace)
     if not target_pid:
         logger.warning("No interactive agy process found.")
         return False

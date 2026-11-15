@@ -269,10 +269,18 @@ def test_stream_session_skeleton_animation():
         view_tick2 = session._render_current_view()
         assert view_tick2 != initial_view
 
-        # 3. Output arrives -> Skeleton is replaced with real output
-        session.feed("Executing tests...\n")
+        # 3. Test header_info persistence with skeleton loader active
+        session.set_header_info("Injected to Desktop Terminal PID 8424:\n> user prompt")
+        assert not session.has_real_output
+        view_with_header = session._render_current_view()
+        assert "Injected to Desktop Terminal PID 8424" in view_with_header
+        assert "Loading live terminal output stream" in view_with_header
+
+        # 4. Real output arrives -> Skeleton is replaced with real output
+        session.feed("● Read: project files\n")
+        assert session.has_real_output
         live_view = session._render_current_view()
-        assert "Executing tests..." in live_view
+        assert "● Read: project files" in live_view
         assert "Loading live terminal output stream" not in live_view
 
         await session.complete(final_status="Done")

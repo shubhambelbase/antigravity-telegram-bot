@@ -192,12 +192,28 @@ class AntigravityRunner:
 
         if os.path.isdir(conv_path):
             self.conversation_id = clean_id
+            try:
+                from execution.console_injector import get_workspace_for_conversation
+                ws = get_workspace_for_conversation(clean_id)
+                if ws and os.path.isdir(ws):
+                    self.workspace_dir = ws
+                    self._record_workspace(ws)
+            except Exception:
+                pass
             return True
         # If passed without full UUID, try matching prefix securely
         if os.path.isdir(self.brain_dir):
             matches = [d for d in os.listdir(self.brain_dir) if d.startswith(clean_id) and SAFE_CONV_ID_RE.match(d)]
             if len(matches) == 1:
                 self.conversation_id = matches[0]
+                try:
+                    from execution.console_injector import get_workspace_for_conversation
+                    ws = get_workspace_for_conversation(matches[0])
+                    if ws and os.path.isdir(ws):
+                        self.workspace_dir = ws
+                        self._record_workspace(ws)
+                except Exception:
+                    pass
                 return True
         return False
 

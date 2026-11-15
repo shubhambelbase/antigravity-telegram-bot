@@ -12,6 +12,31 @@ def test_find_interactive_agy_pid():
     assert pid is None or isinstance(pid, int)
 
 
+def test_find_interactive_agy_pid_with_mocked_processes(monkeypatch):
+    from execution.console_injector import list_interactive_agy_processes
+
+    mock_procs = [
+        {"pid": 1111, "cwd": "E:\\project_a", "conv_id": "aaaa-1111-2222-3333", "create_time": 100.0},
+        {"pid": 2222, "cwd": "C:\\project_b", "conv_id": "bbbb-4444-5555-6666", "create_time": 200.0},
+    ]
+
+    monkeypatch.setattr("execution.console_injector.list_interactive_agy_processes", lambda: mock_procs)
+
+    # 1. Match by conversation ID
+    assert find_interactive_agy_pid(conv_id="aaaa-1111-2222-3333") == 1111
+    assert find_interactive_agy_pid(conv_id="bbbb-4444-5555-6666") == 2222
+
+    # 2. Unknown conversation ID -> Returns None (prevents hijacking unrelated terminal)
+    assert find_interactive_agy_pid(conv_id="unknown-9999-0000") is None
+
+    # 3. Match by workspace
+    assert find_interactive_agy_pid(workspace="E:\\project_a") == 1111
+    assert find_interactive_agy_pid(workspace="C:\\project_b") == 2222
+
+    # 4. No filter -> Returns newest candidate (2222)
+    assert find_interactive_agy_pid() == 2222
+
+
 def test_inject_text_to_invalid_pid():
     res = inject_text_to_agy("test prompt", pid=99999999)
     assert res is False
