@@ -26,6 +26,9 @@ def test_indeterminate_mode():
     assert "Analyzing & Planning" in dashboard
     assert "Activity-based estimate" not in dashboard
     assert "Reading project files" in dashboard
+    # Verify indeterminate skeleton loading bar is present
+    assert "Loading..." in dashboard
+    assert "[" in dashboard and "]" in dashboard
 
 
 def test_activity_based_mode():

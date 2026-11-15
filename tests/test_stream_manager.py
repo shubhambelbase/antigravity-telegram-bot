@@ -240,3 +240,41 @@ def test_stream_session_html_fallback():
         assert "Unclosed bold tag" in fallback_text
 
     asyncio.run(_run())
+
+
+def test_stream_session_skeleton_animation():
+    async def _run():
+        mock_bot = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.message_id = 9900
+        mock_bot.send_message = AsyncMock(return_value=mock_msg)
+        mock_bot.edit_message_text = AsyncMock(return_value=True)
+
+        session = HybridStreamSession(
+            bot=mock_bot,
+            chat_id=555,
+            title="Skeleton Animation Test",
+            edit_interval=0.05,
+            buffer_debounce=0.01,
+        )
+
+        # 1. Before output arrives (loading state)
+        await session.start(initial_status="Starting agent...")
+        initial_view = mock_bot.send_message.call_args.kwargs["text"]
+        # Must contain skeleton loader box
+        assert "Loading live terminal output stream" in initial_view
+        assert "language-bash" in initial_view
+
+        # 2. Render next tick: skeleton changes position (animation)
+        view_tick2 = session._render_current_view()
+        assert view_tick2 != initial_view
+
+        # 3. Output arrives -> Skeleton is replaced with real output
+        session.feed("Executing tests...\n")
+        live_view = session._render_current_view()
+        assert "Executing tests..." in live_view
+        assert "Loading live terminal output stream" not in live_view
+
+        await session.complete(final_status="Done")
+
+    asyncio.run(_run())

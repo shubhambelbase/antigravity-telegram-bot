@@ -112,6 +112,7 @@ class HybridStreamSession:
 
         self.message_id: Optional[int] = None
         self._buffer: List[str] = []
+        self._skeleton_step: int = 0
         self._last_received_time: float = 0.0
         self._last_edit_time: float = 0.0
         self._last_rendered_text: str = ""
@@ -140,6 +141,35 @@ class HybridStreamSession:
             if line.strip():
                 self.progress.feed_line(line)
 
+    def _render_skeleton_terminal(self) -> str:
+        """Renders an animated shimmering skeleton placeholder while waiting for terminal output."""
+        def make_shimmer(step: int, width: int) -> str:
+            chars = ["░"] * width
+            wave = ["▒", "▓", "█", "▓", "▒"]
+            pos = step % (width + len(wave)) - len(wave)
+            for i, ch in enumerate(wave):
+                idx = pos + i
+                if 0 <= idx < width:
+                    chars[idx] = ch
+            return "".join(chars)
+
+        step = self._skeleton_step
+        self._skeleton_step += 1
+
+        line1 = make_shimmer(step, 36)
+        line2 = make_shimmer(step + 4, 26)
+        line3 = make_shimmer(step + 8, 32)
+        line4 = make_shimmer(step + 12, 20)
+
+        return (
+            "┌─ ⏳ Loading live terminal output stream... ────────────┐\n"
+            f"│ {line1}\n"
+            f"│ {line2}\n"
+            f"│ {line3}\n"
+            f"│ {line4}\n"
+            "└────────────────────────────────────────────────────────┘"
+        )
+
     def _render_current_view(self, status: Optional[str] = None) -> str:
         current_status = status or self._status
         raw_text = self.get_full_buffer_text()
@@ -150,7 +180,9 @@ class HybridStreamSession:
             escaped_code = html.escape(terminal_view)
             return f"{dashboard}\n\n<pre><code class=\"language-bash\">{escaped_code}</code></pre>"
         else:
-            return f"{dashboard}\n\n<i>Capturing live terminal stream...</i>"
+            skeleton = self._render_skeleton_terminal()
+            escaped_skeleton = html.escape(skeleton)
+            return f"{dashboard}\n\n<pre><code class=\"language-bash\">{escaped_skeleton}</code></pre>"
 
     async def start(self, initial_status: str = "Initializing...", initial_prompt: Optional[str] = None) -> Optional[int]:
         """Lifecycle Step 1: Send initial persistent message and start 1s flush loop."""
@@ -190,13 +222,19 @@ class HybridStreamSession:
                 if now - self._last_edit_time < self.edit_interval:
                     continue
 
+                if not self._buffer:
+                    # Animate skeleton loader and spinner while loading (before initial terminal output)
+                    if now - self._last_edit_time >= 1.2:
+                        await self._edit_live_message()
+                    continue
+
                 # Check if buffer has received data and accumulated for debounce time (500ms),
                 # or if data has been waiting for more than 1.5s to avoid starvation on streaming
                 time_since_last_input = now - self._last_received_time
                 has_accumulated = time_since_last_input >= self.buffer_debounce
                 is_starving = (now - self._last_edit_time) >= 1.5
 
-                if self._buffer and (has_accumulated or is_starving):
+                if has_accumulated or is_starving:
                     await self._edit_live_message()
 
             except asyncio.CancelledError:

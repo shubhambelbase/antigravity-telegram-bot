@@ -54,6 +54,7 @@ class AdaptiveProgressTracker:
         self.mode: ProgressMode = ProgressMode.INDETERMINATE
         self.percentage: float = 0.0
         self._spinner_idx: int = 0
+        self._skeleton_tick: int = 0
         self._is_completed: bool = False
 
         # Work units completed per category
@@ -81,6 +82,18 @@ class AdaptiveProgressTracker:
         frame = SPINNER_FRAMES[self._spinner_idx % len(SPINNER_FRAMES)]
         self._spinner_idx += 1
         return frame
+
+    def _next_skeleton_bar(self, width: int = 15) -> str:
+        """Renders an animated shimmering skeleton wave for indeterminate/loading states."""
+        chars = ["░"] * width
+        wave = ["▒", "▓", "█", "▓", "▒"]
+        pos = self._skeleton_tick % (width + len(wave)) - len(wave)
+        self._skeleton_tick += 1
+        for i, ch in enumerate(wave):
+            idx = pos + i
+            if 0 <= idx < width:
+                chars[idx] = ch
+        return "".join(chars)
 
     def _add_activity(self, text: str):
         """Adds a clean distinct activity to the current activity list, stripping any raw markup."""
@@ -294,7 +307,9 @@ class AdaptiveProgressTracker:
         # Mode A: Indeterminate
         if self.mode == ProgressMode.INDETERMINATE and not self._is_completed:
             spinner = self._next_spinner()
+            skel_bar = self._next_skeleton_bar(width=15)
             lines.append(f"<b>Activity Status:</b> {spinner} <i>Analyzing & Planning (Unknown workload)</i>")
+            lines.append(f"<code>[{skel_bar}]</code> <i>Loading...</i>")
         # Mode C: Determinate (Measured)
         elif self.mode == ProgressMode.DETERMINATE and not self._is_completed:
             det_pct = (self.determinate_current / self.determinate_total * 100.0) if self.determinate_total > 0 else self.percentage
