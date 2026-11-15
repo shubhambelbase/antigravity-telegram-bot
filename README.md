@@ -72,18 +72,18 @@
 ### 3. Install
 Clone the repository and run the automated installer:
 ```cmd
-git clone https://github.com/your-username/antigravity-telegram-bot.git
+git clone https://github.com/shubhambelbase/antigravity-telegram-bot.git
 cd antigravity-telegram-bot
 setup\install.bat
 ```
-*(The installer sets up your `.venv`, installs requirements, runs 13 unit tests, and creates your `.env` configuration file).*
+*(The installer sets up your `.venv`, installs requirements, runs 46 unit tests, and creates your `.env` configuration file).*
 
 ### 4. Configure & Launch
 1. Open `.env` and paste your bot token:
    ```env
    TELEGRAM_BOT_TOKEN=your_token_here
    ```
-2. Double-click **`run_bot.bat`**.
+2. Double-click **`setup\run_bot.bat`** (or run `antigravity-bot` from your terminal).
 3. In Telegram, open your bot, send **`/start`**, and click the pairing command (e.g. `/claim <YOUR_ID>`).
 4. You are ready! Send any coding prompt or command.
 
