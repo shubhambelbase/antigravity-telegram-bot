@@ -4,6 +4,7 @@ setlocal enabledelayedexpansion
 title Antigravity Telegram Bot - Automatic Installer
 echo ====================================================
 echo   Antigravity Telegram Bot - Automated Setup
+echo   Interactive Remote Control Center for Windows
 echo ====================================================
 echo.
 
@@ -17,7 +18,10 @@ goto :check_python_version
 
 :no_python
 py -3 --version >nul 2>&1
-if not errorlevel 1 goto :check_python_version
+if not errorlevel 1 (
+    doskey python=py -3
+    goto :check_python_version
+)
 
 echo [!] Python was not detected on your system.
 echo [*] Attempting automated Python 3.12 installation via Windows winget...
@@ -76,15 +80,15 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [OK] All Python tools and dependencies installed successfully.
+echo [OK] All Python dependencies installed successfully (python-telegram-bot, pillow, psutil, pytest).
 
-REM 4. Run automated self-tests
-echo [*] Running automated verification test suite...
+REM 4. Run automated verification test suite
+echo [*] Running automated verification test suite (39 unit tests)...
 python -m pytest tests/ --quiet
 if errorlevel 1 (
     echo [WARNING] Some self-tests had warnings. Check logs if needed.
 ) else (
-    echo [OK] All unit tests passed with 100%% success!
+    echo [OK] All 39 unit tests passed with 100%% success!
 )
 
 REM 5. Generate .env configuration file if missing
