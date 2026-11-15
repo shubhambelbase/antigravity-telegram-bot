@@ -23,6 +23,7 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), live sync control (`/sync`, `/mute`, `sync:toggle`), auto-start controls (`/autostart`, `autostart:toggle`), session reuse in `on_pc_user`, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
 - `setup/` - Automated setup & guides:
+  - `push_to_github.bat`: Automated GitHub publisher with secret audit, test verification, gh CLI integration, and main branch push.
   - `enable_autostart.bat` / `disable_autostart.bat`: 1-click Windows auto-start toggle scripts.
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements including pytest, runs 46 verification tests with 100% success, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.

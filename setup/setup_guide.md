@@ -199,3 +199,15 @@ The bot can automatically launch in the background whenever you boot or log in t
 * **Zero Open Ports:** Uses Telegram Long Polling (`getUpdates`); no open inbound ports or port-forwarding required.
 * **Whitelist Enforcement:** Every update is checked against `ALLOWED_TELEGRAM_USER_IDS`. Unauthorized requests are discarded and logged.
 * **Secret Protection:** `.env` and `.bot.pid` are strictly excluded from version control via `.gitignore`.
+
+---
+
+## Pushing to GitHub (`setup/push_to_github.bat`)
+
+To push this project to your GitHub account:
+1. Double-click `setup\push_to_github.bat`.
+2. The script will:
+   - Run a secret audit to ensure `.env` and credentials are never pushed.
+   - Run the 46 automated unit tests.
+   - If GitHub CLI (`gh`) is logged in, offer to automatically create a repository for you (public or private).
+   - If entering a URL manually, connect remote `origin` and push branch `main`.

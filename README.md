@@ -18,8 +18,12 @@
 ## 🌟 Highlights
 
 - 📺 **Direct PC Screen Keystroke Injection**: When your Antigravity terminal is open on your desktop, prompts sent from Telegram physically type out on your monitor and run right before your eyes!
-- 🔄 **Bidirectional Real-Time Mirroring**: Anything you type in your PC terminal mirrors to Telegram in real-time. Anything you send from Telegram mirrors to your PC.
-- 📋 **Live Tool Execution Logs**: See the exact steps Antigravity takes live on Telegram (`○ Thought`, `● Ran command`, `● Edited file`, `● Created file`, `● Read file`).
+- 🔄 **Bidirectional Real-Time Mirroring**: Anything you type in your PC terminal mirrors to Telegram in real-time. Pausable anytime with `/sync` or `/mute`.
+- 📊 **Adaptive Progress System**: Live real-time progress estimation featuring Indeterminate (thinking/planning spinner), Activity-based (weighted work units: editing, testing, verification), and Determinate (measured test runs, e.g. 16/20 tests = 80%) states with dynamic Unicode progress bar.
+- 📋 **Compact Terminal & Action Deduplication**: Live terminal messages window to a clean 8-line view with folding badges and automatically collapse repetitive actions (e.g. `● Read: file.py (x15)`).
+- 📁 **Mobile Workspace Browser**: Interactive file browser with child directories, parent navigation, system drive picker, and folder creation (`/mkdir`).
+- 🎮 **Hardware Keypad & Screen Capture**: Interactive keypad controls (Yes/No, arrows, Enter, select 1-3, Ctrl+C) and desktop screen snapshots (`/screenshot`).
+- 🚀 **Silent Windows Laptop Auto-Start**: Automatically launches on laptop boot via windowless VBScript and `pythonw.exe` without terminal popups.
 - 🔘 **1-Click Session Switcher**: View past Antigravity conversations with `/sessions` and attach to any session with full history via interactive inline buttons.
 - 🔒 **Biometric / Numerical User ID Security**: Whitelist-based authentication locks the bot strictly to your Telegram account. Unauthorized strangers are instantly blocked.
 - ⚡ **Autonomous & Headless Ready**: If you step away and close your desktop terminal, the bot automatically falls back to headless background execution so you can code from anywhere.
@@ -94,9 +98,14 @@ For full setup documentation, see [setup/setup_guide.md](setup/setup_guide.md).
 | **`<any prompt>`** | Sends a task to Antigravity (types on your desktop terminal or runs headlessly). |
 | **`/sessions`** | Lists recent conversations with 1-click interactive inline buttons. |
 | **`/attach <1-5 or ID>`** | Attaches to any past conversation session with full history and context. |
-| **`/status`** | Displays active session ID, desktop terminal connection, host CPU & RAM. |
+| **`/status`** | Displays active session ID, desktop terminal connection, host CPU & RAM, and sync/autostart toggles. |
+| **`/pwd` or `/workspace`** | Opens interactive folder browser with subfolders and system drives. |
 | **`/cd <path>`** | Switches active workspace directory on your machine. |
-| **`/pwd`** | Displays the current workspace folder path. |
+| **`/mkdir <path>`** | Creates a directory and immediately switches workspace into it. |
+| **`/controls`** | Opens interactive hardware keypad (Yes/No, arrows, Enter, select 1-3, Ctrl+C). |
+| **`/screenshot`** | Captures and sends a desktop screenshot. |
+| **`/sync`** | Toggles live PC terminal mirroring on/off (Silent Mode). |
+| **`/autostart`** | Toggles silent auto-start on Windows laptop boot. |
 | **`/new`** | Starts a clean conversation turn. |
 | **`/stop` or `/cancel`** | Immediately terminates the currently executing agent turn. |
 
@@ -119,12 +128,18 @@ python -m pytest tests/
 ```
 Output:
 ```text
-tests\test_formatter.py ...    [ 23%]
-tests\test_injector.py ..      [ 38%]
-tests\test_runner.py ....      [ 69%]
-tests\test_watcher.py ....     [100%]
-============================= 13 passed in 0.3s =============================
+============================= 46 passed in 7.01s =============================
 ```
+
+---
+
+## 🚀 Publishing to GitHub
+
+To push this codebase to your GitHub repository:
+```cmd
+setup\push_to_github.bat
+```
+*(Automatically verifies secrets are safe, runs unit tests, creates the GitHub repo if needed, and pushes branch `main`).*
 
 ---
 
