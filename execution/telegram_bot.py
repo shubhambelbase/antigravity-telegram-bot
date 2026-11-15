@@ -15,6 +15,7 @@ import io
 import logging
 import os
 import string
+import sys
 import time
 from typing import Dict, List, Optional, Set
 
@@ -1321,8 +1322,10 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 def main():
     if not check_single_instance():
-        print("Bot is already running in another window/process.")
-        return
+        print("\n====================================================")
+        print("  [!] Antigravity Telegram Bot is already running.")
+        print("====================================================")
+        sys.exit(2)
 
     if not BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN is missing in .env")
