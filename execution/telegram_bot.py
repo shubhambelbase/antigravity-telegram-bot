@@ -3,7 +3,13 @@
 Listens for Telegram commands, handles inline session-switching buttons,
 directly types into the open desktop PC terminal screen in real-time,
 mirrors live PC terminal interactions and tool logs (Thought/Ran/Edited) to Telegram,
-and streams progress back with native Markdown rendering and Human-in-the-Loop pairing security.
+and streams progress back with a Hybrid Message Editing + Event-Based Streaming mechanism:
+1. Persistent Telegram message: sent once when a session starts.
+2. Continuous buffer: captures stdout/stderr and tool execution logs.
+3. 500ms accumulation debounce: prevents API flooding on line bursts.
+4. ~1.0s periodic edit: updates the persistent message via editMessageText.
+5. Event-based notifications: sends distinct separate messages for task completion,
+   errors, or cancellation.
 """
 
 import atexit
@@ -13,7 +19,7 @@ import io
 import logging
 import os
 import time
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import psutil
 from dotenv import load_dotenv
@@ -31,6 +37,7 @@ from telegram.ext import (
 from execution.agy_runner import AntigravityRunner, ConversationInfo
 from execution.console_injector import find_interactive_agy_pid, inject_text_to_agy
 from execution.formatter import markdown_to_telegram_html
+from execution.stream_manager import TerminalStreamManager
 from execution.transcript_watcher import TranscriptWatcher
 
 # Configure logging
@@ -65,6 +72,7 @@ def parse_allowed_ids() -> Set[int]:
 
 ALLOWED_USER_IDS = parse_allowed_ids()
 runner = AntigravityRunner(agy_path=AGY_PATH, default_workspace=DEFAULT_WORKSPACE)
+stream_manager: Optional[TerminalStreamManager] = None
 
 
 def save_claimed_user(user_id: int):
@@ -145,9 +153,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>PC Screen Control:</b> {screen_status}\n"
         f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
         f"<b>Session:</b> {conv_text}\n"
-        f"<b>Features:</b> Live Screen Typing + Tool Logs (Thought/Ran/Edited)\n\n"
+        f"<b>Streaming Mode:</b> Hybrid Persistent Message + Event Notifications\n\n"
         f"<b>Quick Actions:</b>\n"
-        f"• Send any prompt to type & run directly on your PC screen\n"
+        f"• Send any prompt to run with live 1s terminal updates\n"
         f"• /sessions - View recent sessions with 1-click attach buttons\n"
         f"• /status - Check host, active session, and agent state\n"
         f"• /cd &lt;path&gt; - Switch active workspace directory\n"
@@ -298,7 +306,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Agent Status:</b> {agent_state}\n"
         f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
         f"<b>Active Session:</b> {conv_text}\n"
-        f"<b>Live Tool Logs:</b> 🟢 Active\n"
+        f"<b>Streaming Engine:</b> 🟢 Hybrid Message Editing + Event Alerts\n"
         f"<b>Host CPU:</b> {cpu_pct}%\n"
         f"<b>Host RAM:</b> {mem.percent}% ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)"
     )
@@ -351,6 +359,12 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
+    chat_id = update.effective_chat.id
+    if stream_manager:
+        session = stream_manager.get_session(chat_id)
+        if session and session.is_active:
+            await session.cancel()
+
     if not runner.is_running:
         await update.message.reply_text("ℹ️ No active Antigravity task is currently running.")
         return
@@ -370,6 +384,9 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_prompt:
         return
 
+    chat_id = update.effective_chat.id
+
+    # Shortcut handling for 'attach'
     cleaned_input = user_prompt.lower().replace("...", "").strip()
     if cleaned_input.startswith("attach "):
         target_arg = user_prompt.split("attach ", 1)[1].strip()
@@ -393,24 +410,26 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-    # Check if an interactive terminal window is open on the desktop
+    # Check if an interactive terminal window is open on desktop
     interactive_pid = find_interactive_agy_pid()
-    if interactive_pid:
-        status_message = await update.message.reply_text(
-            f"⚡ <b>Typing into PC Terminal Screen...</b>\n\n<code>{html.escape(user_prompt)}</code>",
-            parse_mode=ParseMode.HTML,
+    if interactive_pid and stream_manager:
+        # Start persistent stream session for desktop terminal injection
+        session = await stream_manager.start_session(
+            chat_id=chat_id,
+            title="Antigravity Live PC Screen",
+            initial_status="Injecting Prompt...",
+            initial_prompt=user_prompt,
         )
         injected = inject_text_to_agy(user_prompt, pid=interactive_pid)
         if injected:
-            await status_message.edit_text(
-                f"📺 <b>Prompt Injected & Running on PC Screen!</b>\n\n"
-                f"<code>{html.escape(user_prompt)}</code>\n\n"
-                f"<i>Your PC terminal is now executing this task live. Tool actions and results will stream here as they happen.</i>",
-                parse_mode=ParseMode.HTML,
+            session.feed(
+                f"Prompt injected to desktop terminal PID {interactive_pid}:\n"
+                f"> {user_prompt}\n\n"
+                f"Waiting for live tool execution logs...\n"
             )
             return
 
-    # Fallback to headless execution if no interactive desktop terminal is running
+    # Headless execution fallback
     if runner.is_running:
         await update.message.reply_text(
             "⚠️ An Antigravity task is already executing. Send /stop to cancel it first.",
@@ -418,69 +437,42 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    session_hint = f" (Session: <code>{runner.conversation_id[:8]}...</code>)" if runner.conversation_id else ""
-    status_message = await update.message.reply_text(
-        f"⚡ <b>Antigravity Task Started...{session_hint}</b>\n<i>Initializing agent environment...</i>",
-        parse_mode=ParseMode.HTML,
+    assert stream_manager is not None
+    session_title = f"Antigravity Session ({runner.conversation_id[:8]}...)" if runner.conversation_id else "Antigravity Session"
+
+    # Step 1: Session starts -> Send persistent message and store chat_id and message_id
+    session = await stream_manager.start_session(
+        chat_id=chat_id,
+        title=session_title,
+        initial_status="Started",
+        initial_prompt=user_prompt,
+        edit_interval=1.0,
+        buffer_debounce=0.5,
     )
 
-    last_edit_time = 0.0
-    buffer_lines = []
+    # Step 2 & 3 & 4: Output arrives continuously from process -> buffered & edited ~1s
+    result = await runner.execute_prompt(user_prompt, on_chunk=session.feed)
 
-    async def on_stream_chunk(line: str):
-        nonlocal last_edit_time
-        buffer_lines.append(line)
-        now = time.time()
-        if now - last_edit_time > 2.0:
-            last_edit_time = now
-            tail = "".join(buffer_lines[-10:])
-            escaped_tail = html.escape(tail)
-            if len(escaped_tail) > 3000:
-                escaped_tail = escaped_tail[-3000:]
-            try:
-                await status_message.edit_text(
-                    f"⚡ <b>Antigravity Running...{session_hint}</b>\n\n<pre><code>{escaped_tail}</code></pre>",
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
-
-    result = await runner.execute_prompt(user_prompt, on_chunk=on_stream_chunk)
-
+    # Step 5: Task completes or important events occur
     if result.is_cancelled:
-        await status_message.edit_text("🛑 <b>Task Cancelled.</b>", parse_mode=ParseMode.HTML)
+        await session.cancel()
         return
 
     if result.error_message:
-        await status_message.edit_text(
-            f"❌ <b>Error:</b>\n<code>{html.escape(result.error_message)}</code>",
-            parse_mode=ParseMode.HTML,
-        )
+        await session.fail(result.error_message)
         return
 
     final_text = result.full_output.strip() or "(Task completed with empty output)"
     conv_footer = f"\n\n<i>Session: <code>{runner.conversation_id}</code></i>" if runner.conversation_id else ""
     formatted_html = markdown_to_telegram_html(final_text)
 
-    if len(formatted_html) + len(conv_footer) <= 3800:
-        try:
-            await status_message.edit_text(
-                f"✅ <b>Task Complete:</b>\n\n{formatted_html}{conv_footer}",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            await status_message.edit_text(
-                f"✅ <b>Task Complete:</b>\n\n<pre><code>{html.escape(final_text)}</code></pre>{conv_footer}",
-                parse_mode=ParseMode.HTML,
-            )
-    else:
-        await status_message.edit_text(f"✅ <b>Task Complete:</b> (Output attached below){conv_footer}", parse_mode=ParseMode.HTML)
-        doc = io.BytesIO(final_text.encode("utf-8"))
-        doc.name = "antigravity_output.txt"
-        await update.message.reply_document(
-            document=doc,
-            caption="📄 Full execution output log",
-        )
+    # Send separate completion notification
+    event_notification = f"✅ <b>Task Completed:</b>\n\n{formatted_html}{conv_footer}"
+    await session.complete(
+        final_status="Completed",
+        event_notification=event_notification,
+        full_output=result.full_output,
+    )
 
 
 def check_single_instance() -> bool:
@@ -512,93 +504,78 @@ def check_single_instance() -> bool:
 
 
 async def post_init(application: Application):
-    """Initializes and starts the real-time transcript mirror watcher with throttled live tool logs."""
-    live_progress_msgs: Dict[int, int] = {}
-    live_bullets_buffer: Dict[int, List[str]] = {}
-    last_step_edit_time: Dict[int, float] = {}
+    """Initializes and starts the hybrid streaming engine and transcript mirror watcher."""
+    global stream_manager
+    stream_manager = TerminalStreamManager(bot=application.bot)
+    application.bot_data["stream_manager"] = stream_manager
 
     async def on_pc_user(conv_id: str, prompt: str):
-        live_bullets_buffer.clear()
         for user_id in ALLOWED_USER_IDS:
             try:
-                await application.bot.send_message(
+                # Step 1: Start persistent session for PC input
+                await stream_manager.start_session(
                     chat_id=user_id,
-                    text=f"💻 <b>[PC Terminal User Input]</b>\n\n<code>{html.escape(prompt)}</code>",
-                    parse_mode=ParseMode.HTML,
+                    title="Antigravity PC Screen Session",
+                    initial_status="User Input Detected",
+                    initial_prompt=prompt,
                 )
-                live_progress_msgs.pop(user_id, None)
             except Exception as e:
-                logger.warning(f"Failed to mirror PC prompt: {e}")
+                logger.warning(f"Failed to initialize PC stream session: {e}")
 
     async def on_pc_activity_step(conv_id: str, bullet: str):
-        """Streams live tool execution and thought bullets to Telegram with rate-limiting."""
-        now = time.time()
+        """Streams live tool execution and thoughts using Hybrid Message Editing."""
         for user_id in ALLOWED_USER_IDS:
-            bullets = live_bullets_buffer.setdefault(user_id, [])
-            bullets.append(bullet)
-            recent_bullets = bullets[-6:]  # Keep last 6 actions visible
-            display_text = "⚡ <b>Antigravity Working...</b>\n\n" + "\n".join(recent_bullets)
-
-            # Throttle edits to at most once per 1.5s to prevent rate limits
-            if user_id in live_progress_msgs and (now - last_step_edit_time.get(user_id, 0.0) < 1.5):
-                continue
-            last_step_edit_time[user_id] = now
-
-            try:
-                msg_id = live_progress_msgs.get(user_id)
-                if not msg_id:
-                    sent = await application.bot.send_message(
-                        chat_id=user_id,
-                        text=display_text,
-                        parse_mode=ParseMode.HTML,
-                    )
-                    live_progress_msgs[user_id] = sent.message_id
-                else:
-                    await application.bot.edit_message_text(
-                        chat_id=user_id,
-                        message_id=msg_id,
-                        text=display_text,
-                        parse_mode=ParseMode.HTML,
-                    )
-            except Exception:
-                pass
+            session = stream_manager.get_session(user_id)
+            if not session or not session.is_active:
+                session = await stream_manager.start_session(
+                    chat_id=user_id,
+                    title="Antigravity PC Screen Session",
+                    initial_status="Working...",
+                )
+            # Step 2 & 3: Feed chunk to 500ms buffer, edits ~1s
+            session.feed(bullet + "\n")
 
     async def on_pc_model(conv_id: str, content: str, all_bullets: List[str]):
+        """Step 5: Completes persistent session and delivers separate event notification."""
         formatted_html = markdown_to_telegram_html(content)
         steps_summary = ""
         if all_bullets:
             steps_joined = "\n".join(all_bullets[-8:])
             steps_summary = f"📋 <b>Execution Log:</b>\n<blockquote>{steps_joined}</blockquote>\n\n"
 
-        full_message = f"{steps_summary}🤖 <b>[Antigravity Response]</b>\n\n{formatted_html}"
+        event_notification = f"{steps_summary}🤖 <b>[Antigravity Response]</b>\n\n{formatted_html}"
 
         for user_id in ALLOWED_USER_IDS:
-            live_progress_msgs.pop(user_id, None)
-            live_bullets_buffer.pop(user_id, None)
-
-            try:
-                if len(full_message) <= 3800:
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=full_message,
-                        parse_mode=ParseMode.HTML,
-                    )
-                else:
-                    doc = io.BytesIO(content.encode("utf-8"))
-                    doc.name = "antigravity_pc_output.txt"
-                    header = steps_summary if steps_summary else "🤖 <b>[Antigravity Response]</b>\n\n"
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=header + "<i>(Full output attached below due to length)</i>",
-                        parse_mode=ParseMode.HTML,
-                    )
-                    await application.bot.send_document(
-                        chat_id=user_id,
-                        document=doc,
-                        caption="📄 Antigravity Output",
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to mirror PC response: {e}")
+            session = stream_manager.get_session(user_id)
+            if session and session.is_active:
+                await session.complete(
+                    final_status="Completed",
+                    event_notification=event_notification,
+                    full_output=content,
+                )
+            else:
+                try:
+                    if len(event_notification) <= 3900:
+                        await application.bot.send_message(
+                            chat_id=user_id,
+                            text=event_notification,
+                            parse_mode=ParseMode.HTML,
+                        )
+                    else:
+                        doc = io.BytesIO(content.encode("utf-8"))
+                        doc.name = "antigravity_pc_output.txt"
+                        await application.bot.send_message(
+                            chat_id=user_id,
+                            text="🤖 <b>[Antigravity Response]</b>\n<i>(Output attached below due to length)</i>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                        await application.bot.send_document(
+                            chat_id=user_id,
+                            document=doc,
+                            caption="📄 Antigravity Output",
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to mirror PC response: {e}")
 
     watcher = TranscriptWatcher(
         brain_dir=runner.brain_dir,
@@ -610,7 +587,7 @@ async def post_init(application: Application):
     )
     watcher.start()
     application.bot_data["watcher"] = watcher
-    logger.info("Transcript live mirror watcher with tool logs active.")
+    logger.info("Hybrid streaming manager and transcript mirror watcher active.")
 
 
 async def post_shutdown(application: Application):
@@ -633,7 +610,7 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN is missing in .env")
         return
 
-    logger.info("Starting Antigravity Telegram Bot with Live PC Console Injection & Tool Logs...")
+    logger.info("Starting Antigravity Telegram Bot with Hybrid Message Editing + Event Streaming...")
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -658,7 +635,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_prompt))
     app.add_error_handler(global_error_handler)
 
-    logger.info("Bot is polling with live PC terminal injection and tool execution logs...")
+    logger.info("Bot is polling with Hybrid Streaming (1s persistent edits + event alerts)...")
     app.run_polling()
 
 

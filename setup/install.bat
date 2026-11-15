@@ -84,7 +84,7 @@ python -m pytest tests/ --quiet
 if errorlevel 1 (
     echo [WARNING] Some self-tests had warnings. Check logs if needed.
 ) else (
-    echo [OK] All 13 unit tests passed with 100%% success!
+    echo [OK] All unit tests passed with 100%% success!
 )
 
 REM 5. Generate .env configuration file if missing
