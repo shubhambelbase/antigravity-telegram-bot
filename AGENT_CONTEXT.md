@@ -1,7 +1,7 @@
 # Project Context: Antigravity Telegram Bot
 
 ## Overview
-A lightweight, reliable, autonomous Telegram remote control center for Google Antigravity CLI (`agy`). Features real-time CLI connection detection, normal command execution, interactive prompts (Yes / No / Select / Navigation keys), live hybrid streaming output with 1-second edits, desktop screen snapshotting with WinSta0 desktop attachment, interactive Telegram workspace browser (`/cd`, `/pwd`, `/mkdir`), and full session history / logs inspection.
+A lightweight, reliable, autonomous Telegram remote control center for Google Antigravity CLI (`agy`). Features real-time CLI connection detection, normal command execution, interactive prompts (Yes / No / Select / Navigation keys), live hybrid streaming output with 1-second edits, Adaptive Progress System (Indeterminate, Activity-based, and Determinate states), desktop screen snapshotting with WinSta0 desktop attachment, interactive Telegram workspace browser (`/cd`, `/pwd`, `/mkdir`), and full session history / logs inspection.
 
 ## Stack & Environment
 - **OS**: Windows
@@ -13,9 +13,10 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `directives/` - Standard Operating Procedures:
   - `antigravity_telegram_bridge.md`: Execution rules, timeouts, safety protocols.
 - `execution/` - Core Python services:
+  - `progress_tracker.py`: Adaptive Progress System supporting Mode A (Indeterminate spinner for thinking/planning), Mode B (Activity-based weighted progress: planning 10, exploring 10, editing 30, testing 25, fixing 15, verification 10), and Mode C (Determinate measured progress e.g. 16/20 tests). Ensures non-decreasing monotonicity and cap rules.
   - `console_injector.py`: Win32 `AttachConsole`, `VkKeyScanW`, `MapVirtualKeyW`, and `WriteConsoleInputW` injector typing normal prompts and interactive keys (Yes/No/Select/Arrows/Ctrl+C).
   - `screenshot.py`: Desktop screen capture utility (WinSta0 / desktop attachment, PIL ImageGrab, Win32 GDI BitBlt) with blank/transparency validation (`is_blank_or_invalid_image`) and high-fidelity dark-mode terminal window snapshot renderer fallback.
-  - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Maintains persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, and separate event notifications for completions/errors.
+  - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Embeds the Adaptive Progress Dashboard into the persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, and separate event notifications for completions/errors.
   - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, and extracting tool calls/thoughts.
   - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), workspace resolution, subdirectory listing, parent tracking, system drive discovery, and recent workspaces history.
   - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
@@ -23,7 +24,8 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `setup/` - Automated setup & guides:
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs test suite, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Complete step-by-step documentation for users cloning the repo.
-- `tests/` - Unit tests (33 passed):
+- `tests/` - Unit tests (39 passed):
+  - `test_progress_tracker.py`: Tests Mode A (indeterminate), Mode B (activity-based), Mode C (determinate), monotonic non-decreasing progress, 95% cap rule, and pytest line integration.
   - `test_workspace.py`: Tests interactive workspace browser cards, child folder buttons, and system drive selection menus.
   - `test_screenshot.py`: Tests screenshot capture, WinSta0 attachment, blank/transparent validation, and terminal snapshot rendering.
   - `test_stream_manager.py`: Tests ANSI stripping, terminal windowing, 500ms buffer accumulation, ~1.0s periodic edits, completion events, error/cancel events.
@@ -52,5 +54,5 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `/mkdir <path>`: Creates a directory and immediately switches workspace into it.
 
 ## Status & Next Steps
-- Status: Interactive Workspace Browser fully integrated into Telegram. All 33 unit tests passing (100% success). Daemon active and polling.
+- Status: Adaptive Progress System (Indeterminate, Activity-based, and Determinate states) fully implemented and integrated. All 39 unit tests passing (100% success). Daemon active and polling.
 - Last updated: 2026-11-15.

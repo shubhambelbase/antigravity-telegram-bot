@@ -17,6 +17,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from execution.progress_tracker import AdaptiveProgressTracker, ProgressMode
+
 logger = logging.getLogger(__name__)
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
@@ -55,6 +57,7 @@ class HybridStreamSession:
         self.title = title
         self.edit_interval = edit_interval
         self.buffer_debounce = buffer_debounce
+        self.progress = AdaptiveProgressTracker(operation_title=title)
 
         self.message_id: Optional[int] = None
         self._buffer: List[str] = []
@@ -74,23 +77,26 @@ class HybridStreamSession:
         return "".join(self._buffer)
 
     def feed(self, chunk: str):
-        """Buffers arriving chunk of terminal output or tool log."""
+        """Buffers arriving chunk of terminal output or tool log and updates progress."""
         if not chunk:
             return
         self._buffer.append(chunk)
         self._last_received_time = time.time()
+        for line in chunk.splitlines():
+            if line.strip():
+                self.progress.feed_line(line)
 
     def _render_current_view(self, status: Optional[str] = None) -> str:
         current_status = status or self._status
         raw_text = self.get_full_buffer_text()
-        terminal_view = format_terminal_window(raw_text)
+        terminal_view = format_terminal_window(raw_text, max_chars=2800)
+        dashboard = self.progress.render_dashboard(status=current_status)
 
-        header = f"⚡ <b>{html.escape(self.title)}</b> <i>[{html.escape(current_status)}]</i>\n\n"
         if terminal_view.strip():
             escaped_code = html.escape(terminal_view)
-            return f"{header}<pre><code class=\"language-bash\">{escaped_code}</code></pre>"
+            return f"{dashboard}\n\n<pre><code class=\"language-bash\">{escaped_code}</code></pre>"
         else:
-            return f"{header}<i>Initializing terminal output stream...</i>"
+            return f"{dashboard}\n\n<i>Capturing live terminal stream...</i>"
 
     async def start(self, initial_status: str = "Initializing...", initial_prompt: Optional[str] = None) -> Optional[int]:
         """Lifecycle Step 1: Send initial persistent message and start 1s flush loop."""
@@ -99,10 +105,10 @@ class HybridStreamSession:
         self._last_received_time = time.time()
         self._last_edit_time = time.time()
 
-        initial_text = f"⚡ <b>{html.escape(self.title)}</b> <i>[{html.escape(initial_status)}]</i>\n\n"
         if initial_prompt:
-            initial_text += f"Prompt: <code>{html.escape(initial_prompt[:120])}</code>\n\n"
-        initial_text += "<i>Capturing live terminal stream...</i>"
+            self.progress.operation_title = initial_prompt
+
+        initial_text = self._render_current_view(status=initial_status)
 
         try:
             sent = await self.bot.send_message(
@@ -186,6 +192,7 @@ class HybridStreamSession:
             self._flush_task.cancel()
 
         self._status = final_status
+        self.progress.complete()
         await self._edit_live_message(status=final_status)
 
         # Send separate completion event notification if provided
@@ -223,6 +230,7 @@ class HybridStreamSession:
             self._flush_task.cancel()
 
         self._status = "Failed"
+        self.progress.record_fixing(error_message[:40])
         await self._edit_live_message(status="Failed")
 
         error_event = (
