@@ -21,6 +21,15 @@ def test_format_tool_call():
     }
     assert "● Ran: <code>Run unit test</code>" == format_tool_call(tc_run)
 
+    # Test HTML escaping of <, >, and &
+    tc_html = {
+        "name": "run_command",
+        "args": {"CommandLine": "cat < input.txt && echo > out.txt", "toolSummary": "Check <tag> & output"}
+    }
+    formatted = format_tool_call(tc_html)
+    assert "&lt;tag&gt;" in formatted
+    assert "&amp;" in formatted
+
     tc_edit = {"name": "edit_file", "args": {"Path": "E:/test/script.py"}}
     assert "● Edited: <code>script.py</code>" == format_tool_call(tc_edit)
 
@@ -28,6 +37,13 @@ def test_format_tool_call():
 def test_format_thinking():
     th = "Analyzing dependencies and file structure.\nDetails..."
     assert "○ Thought: <i>Analyzing dependencies and file structure.</i>" == format_thinking(th)
+
+    # Test HTML escaping in thinking
+    th_special = "Comparing if count < 10 && val > 0"
+    formatted_th = format_thinking(th_special)
+    assert "&lt;" in formatted_th
+    assert "&gt;" in formatted_th
+    assert "&amp;" in formatted_th
 
 
 def test_transcript_watcher_detection(tmp_path):

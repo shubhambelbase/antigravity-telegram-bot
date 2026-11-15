@@ -337,17 +337,21 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
+    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        return
+
     conv_id = context.args[0].strip() if context.args else None
     target_id = conv_id or runner.conversation_id or runner._get_latest_conversation_id()
 
     if not target_id:
-        await update.message.reply_text("ℹ️ No active session to export logs from.", reply_markup=QUICK_ACTION_KEYBOARD)
+        await msg.reply_text("ℹ️ No active session to export logs from.", reply_markup=QUICK_ACTION_KEYBOARD)
         return
 
     log_content = runner.get_session_log_export(conv_id=target_id, max_lines=250)
 
     if len(log_content) <= 3500:
-        await update.message.reply_text(
+        await msg.reply_text(
             f"📄 <b>Session Execution Log (<code>{target_id[:8]}...</code>):</b>\n\n"
             f"<pre><code>{html.escape(log_content)}</code></pre>",
             parse_mode=ParseMode.HTML,
@@ -356,7 +360,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         doc = io.BytesIO(log_content.encode("utf-8"))
         doc.name = f"session_{target_id[:8]}_log.txt"
-        await update.message.reply_document(
+        await msg.reply_document(
             document=doc,
             caption=f"📄 Full session execution log ({target_id[:8]}...)",
             reply_markup=QUICK_ACTION_KEYBOARD,
@@ -496,6 +500,10 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
+    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        return
+
     chat_id = update.effective_chat.id
     active_terminal_text = None
     if stream_manager:
@@ -503,7 +511,7 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if session:
             active_terminal_text = session.get_full_buffer_text()
 
-    status_msg = await update.message.reply_text(
+    status_msg = await msg.reply_text(
         "📸 <i>Capturing screen snapshot...</i>",
         parse_mode=ParseMode.HTML,
     )
@@ -516,7 +524,7 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_stream = io.BytesIO(png_bytes)
         photo_stream.name = "screenshot.png"
 
-        await update.message.reply_photo(
+        await msg.reply_photo(
             photo=photo_stream,
             caption=f"{caption}\n<i>Host: Windows | Screen Control: {'🟢 Connected' if interactive_pid else '⚪ Headless'}</i>",
             parse_mode=ParseMode.HTML,
@@ -856,7 +864,7 @@ async def post_init(application: Application):
 
     watcher = TranscriptWatcher(
         brain_dir=runner.brain_dir,
-        get_active_conv_id=lambda: runner.conversation_id,
+        get_active_conv_id=lambda: runner.conversation_id or runner._get_latest_conversation_id(),
         is_bot_running=lambda: runner.is_running,
         on_user_turn=on_pc_user,
         on_model_turn=on_pc_model,

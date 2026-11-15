@@ -6,6 +6,7 @@ and mirroring them to Telegram with live terminal-like bullets.
 """
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ def extract_clean_user_content(raw: str) -> str:
 
 
 def format_tool_call(tc: dict) -> str:
-    """Formats a tool call into a terminal-like bullet."""
+    """Formats a tool call into a terminal-like bullet with safe HTML escaping."""
     name = tc.get("name", "tool")
     args = tc.get("args", {})
     if not isinstance(args, dict):
@@ -35,33 +36,34 @@ def format_tool_call(tc: dict) -> str:
     if name == "run_command":
         summary = str(args.get("toolSummary", "")).strip('\"\'')
         cmd = str(args.get("CommandLine", "")).strip('\"\'')
-        label = summary or cmd[:50]
+        label = html.escape(summary or cmd[:50])
         return f"● Ran: <code>{label}</code>"
     elif name == "edit_file":
         p = str(args.get("Path", "")).strip('\"\'')
-        fname = os.path.basename(p) or p
+        fname = html.escape(os.path.basename(p) or p)
         return f"● Edited: <code>{fname}</code>"
     elif name == "write_file":
         p = str(args.get("Path", "")).strip('\"\'')
-        fname = os.path.basename(p) or p
+        fname = html.escape(os.path.basename(p) or p)
         return f"● Created: <code>{fname}</code>"
     elif name == "read_file":
         p = str(args.get("Path", "")).strip('\"\'')
-        fname = os.path.basename(p) or p
+        fname = html.escape(os.path.basename(p) or p)
         return f"● Read: <code>{fname}</code>"
     elif name == "manage_task":
-        action = str(args.get("Action", "")).strip('\"\'')
-        tid = str(args.get("TaskId", "")).strip('\"\'').split("/")[-1]
+        action = html.escape(str(args.get("Action", "")).strip('\"\''))
+        tid = html.escape(str(args.get("TaskId", "")).strip('\"\'').split("/")[-1])
         return f"● Task: <code>{action} {tid}</code>".strip()
     elif name == "search_web":
-        q = str(args.get("query", "")).strip('\"\'')
-        return f"● Search: <code>{q[:40]}</code>"
+        q = html.escape(str(args.get("query", "")).strip('\"\'')[:40])
+        return f"● Search: <code>{q}</code>"
     else:
-        return f"● Tool: <code>{name}</code>"
+        escaped_name = html.escape(name)
+        return f"● Tool: <code>{escaped_name}</code>"
 
 
 def format_thinking(thinking_text: str) -> Optional[str]:
-    """Formats thinking trace into a concise bullet."""
+    """Formats thinking trace into a concise bullet with safe HTML escaping."""
     if not thinking_text or not thinking_text.strip():
         return None
     # Pick first non-empty line
@@ -71,7 +73,8 @@ def format_thinking(thinking_text: str) -> Optional[str]:
     summary = lines[0]
     if len(summary) > 75:
         summary = summary[:72] + "..."
-    return f"○ Thought: <i>{summary}</i>"
+    escaped_summary = html.escape(summary)
+    return f"○ Thought: <i>{escaped_summary}</i>"
 
 
 class TranscriptWatcher:

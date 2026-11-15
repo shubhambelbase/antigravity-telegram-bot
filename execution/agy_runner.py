@@ -313,10 +313,15 @@ class AntigravityRunner:
                 if latest_id:
                     self.conversation_id = latest_id
 
+            err_msg = None
+            if returncode != 0 and not self._cancelled:
+                err_msg = f"CLI process exited with non-zero exit code {returncode}."
+
             return RunResult(
                 returncode=returncode or 0,
                 full_output="".join(full_output_lines),
                 is_cancelled=self._cancelled,
+                error_message=err_msg,
                 conversation_id=self.conversation_id,
             )
 

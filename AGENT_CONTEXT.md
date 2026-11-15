@@ -16,9 +16,9 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `console_injector.py`: Win32 `AttachConsole`, `VkKeyScanW`, `MapVirtualKeyW`, and `WriteConsoleInputW` injector typing normal prompts and interactive keys (Yes/No/Select/Arrows/Ctrl+C).
   - `screenshot.py`: Desktop screen capture utility (PIL ImageGrab / PowerShell) and high-fidelity dark-mode terminal window snapshot renderer.
   - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Maintains persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, and separate event notifications for completions/errors.
-  - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` to detect desktop PC interactions, extracting tool calls and thinking traces, and pushing them to Telegram.
-  - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), session turns extraction (`get_session_turns`), and logs export (`get_session_log_export`).
-  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, hybrid stream engine, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
+  - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, and extracting tool calls/thoughts.
+  - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), non-zero return code failure tracking, and logs export (`get_session_log_export`).
+  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, callback query message resolvers, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
 - `setup/` - Automated setup & guides:
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs test suite, copies `.env.example`, pauses at end).
@@ -28,7 +28,7 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `test_stream_manager.py`: Tests ANSI stripping, terminal windowing, 500ms buffer accumulation, ~1.0s periodic edits, completion events, error/cancel events.
   - `test_runner.py`: Tests runner initialization, workspace switching, session resets, conversation discovery, turn extraction, and log export.
   - `test_formatter.py`: Tests Markdown-to-HTML conversion.
-  - `test_watcher.py`: Tests live transcript change detection, tool call extraction, and dispatching.
+  - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, and dispatching.
   - `test_injector.py`: Tests process detection, alphanumeric/symbol/space key event records, special keys (Yes/No/Select/Arrows/Ctrl+C), scan codes, and injection safety fallback.
 - `.tmp/` - Temporary files and process run logs.
 - `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
@@ -46,5 +46,5 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `[ 🛑 Ctrl+C ]` `[ ⌫ Backspace ]` `[ 📸 Screenshot ]`
 
 ## Status & Next Steps
-- Status: Remote Control upgrade complete (CLI connection monitoring, interactive prompts, live hybrid output, session history & logs export). All 26 unit tests passing (100% success). Daemon active.
+- Status: Full codebase bug audit and fixes applied (callback query message resolution, HTML escaping in tool bullets, non-zero return code detection, auto-tracking initial watcher fallback). 26 unit tests passing (100% success). Daemon active.
 - Last updated: 2026-11-15.
