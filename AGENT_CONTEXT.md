@@ -19,7 +19,7 @@ A lightweight, reliable, autonomous Telegram bot controller for Google Antigravi
   - `telegram_bot.py`: Telegram long-polling bot with user whitelist security, throttled message streaming, inline buttons, `/sessions`, `/attach` commands, PID file single-instance lock, and rate-limited live tool updates.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
 - `setup/` - Automated setup & guides:
-  - `install.bat`: 1-click Windows installer (installs Python via winget if missing, creates `.venv`, installs requirements, runs test suite, copies `.env.example`).
+  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs test suite, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Complete step-by-step documentation for users cloning the repo.
 - `tests/` - Unit tests:
   - `test_runner.py`: Tests runner initialization, workspace switching, session resets, and conversation discovery.
@@ -44,5 +44,5 @@ A lightweight, reliable, autonomous Telegram bot controller for Google Antigravi
 - Plain text - Types prompt directly into the active PC terminal screen (or runs headlessly if no terminal is open).
 
 ## Status & Next Steps
-- Status: Fully separated codebase, automated winget installer, clean git tree. All 13 tests passing. Polling service operational.
+- Status: Fully verified installer fix, all 13 tests passing (100% success), clean git tree. Bot polling operational.
 - Last updated: 2026-11-15.
