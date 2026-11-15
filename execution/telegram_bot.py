@@ -44,7 +44,7 @@ from execution.console_injector import (
 )
 from execution.formatter import markdown_to_telegram_html
 from execution.screenshot import get_screenshot
-from execution.stream_manager import TerminalStreamManager
+from execution.stream_manager import TerminalStreamManager, collapse_consecutive_lines
 from execution.transcript_watcher import TranscriptWatcher
 
 # Configure logging
@@ -1134,7 +1134,8 @@ async def post_init(application: Application):
         formatted_html = markdown_to_telegram_html(content)
         steps_summary = ""
         if all_bullets:
-            steps_joined = "\n".join(all_bullets[-8:])
+            collapsed_bullets = collapse_consecutive_lines(all_bullets)
+            steps_joined = "\n".join(collapsed_bullets[-8:])
             steps_summary = f"📋 <b>Execution Log:</b>\n<blockquote>{steps_joined}</blockquote>\n\n"
 
         event_notification = f"{steps_summary}🤖 <b>[Antigravity Response]</b>\n\n{formatted_html}"

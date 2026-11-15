@@ -105,3 +105,17 @@ def test_feed_line_integration():
 
     tracker.complete()
     assert tracker.percentage == 100.0
+
+
+def test_progress_tracker_strips_html_tags():
+    tracker = AdaptiveProgressTracker(operation_title="HTML Strip Test")
+    tracker.feed_line("○ Thought: <i>Checking configuration settings</i>")
+    tracker.feed_line("● Edited: <code>telegram_bot.py</code>")
+    tracker.feed_line("● Read: <code>test_watcher.py</code>")
+
+    dashboard = tracker.render_dashboard()
+    assert "<code>telegram_bot.py" not in dashboard
+    assert "<code>test_watcher.py" not in dashboard
+    assert "<i>Checking" not in dashboard
+    assert "• Editing telegram_bot.py" in dashboard
+    assert "• Reading project files (test_watcher.py)" in dashboard

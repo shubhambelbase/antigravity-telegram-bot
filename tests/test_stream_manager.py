@@ -7,6 +7,7 @@ import pytest
 from execution.stream_manager import (
     HybridStreamSession,
     TerminalStreamManager,
+    collapse_consecutive_lines,
     format_terminal_window,
     strip_ansi,
 )
@@ -28,6 +29,48 @@ def test_format_terminal_window():
     truncated = format_terminal_window(long_text, max_chars=200)
     assert "... [earlier terminal output truncated] ..." in truncated
     assert len(truncated) <= 350
+
+
+def test_collapse_consecutive_lines():
+    lines = [
+        "● Read: telegram_bot.py",
+        "● Read: telegram_bot.py",
+        "● Read: telegram_bot.py",
+        "● Edited: telegram_bot.py",
+        "● Read: telegram_bot.py",
+        "● Read: telegram_bot.py",
+    ]
+    collapsed = collapse_consecutive_lines(lines)
+    assert collapsed == [
+        "● Read: telegram_bot.py (x3)",
+        "● Edited: telegram_bot.py",
+        "● Read: telegram_bot.py (x2)",
+    ]
+
+
+def test_format_terminal_window_strips_html_and_limits_lines():
+    raw = "\n".join([
+        "o Thought: <i>Thinking about solution</i>",
+        "● Ran: <code>git status</code>",
+        "● Read: <code>telegram_bot.py</code>",
+        "● Read: <code>telegram_bot.py</code>",
+        "● Read: <code>telegram_bot.py</code>",
+        "● Edited: <code>telegram_bot.py</code>",
+        "● Read: <code>test_watcher.py</code>",
+        "● Read: <code>test_watcher.py</code>",
+        "● Created: <code>test_watcher.py</code>",
+        "● Ran: <code>pytest tests/</code>",
+    ])
+    formatted = format_terminal_window(raw, max_lines=5)
+    # Verify no raw HTML tags leaked
+    assert "<code>" not in formatted
+    assert "</code>" not in formatted
+    assert "<i>" not in formatted
+    assert "</i>" not in formatted
+    # Verify collapsing
+    assert "Read: telegram_bot.py (x3)" in formatted
+    # Verify windowing
+    assert "... [earlier terminal output truncated] ..." in formatted
 
 
 def test_stream_session_lifecycle():

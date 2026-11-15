@@ -29,16 +29,64 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
-def format_terminal_window(raw: str, max_chars: int = 3200) -> str:
-    """Formats output buffer into a clean terminal view fitting Telegram limits."""
+def collapse_consecutive_lines(lines: List[str]) -> List[str]:
+    """Collapses consecutive identical lines into a single line with count (e.g. line (x3))."""
+    clean_lines = [l.strip() for l in lines if l and l.strip()]
+    if not clean_lines:
+        return []
+
+    collapsed: List[str] = []
+    current_line = clean_lines[0]
+    count = 1
+
+    for line in clean_lines[1:]:
+        if line == current_line:
+            count += 1
+        else:
+            collapsed.append(f"{current_line} (x{count})" if count > 1 else current_line)
+            current_line = line
+            count = 1
+
+    collapsed.append(f"{current_line} (x{count})" if count > 1 else current_line)
+    return collapsed
+
+
+def format_terminal_window(raw: str, max_chars: int = 2800, max_lines: int = 8) -> str:
+    """Formats output buffer into a compact, clean terminal view fitting Telegram limits.
+
+    - Strips ANSI sequences and raw HTML tags.
+    - Collapses consecutive duplicate actions (e.g. repeated file reads).
+    - Limits visible window to the most recent max_lines with a clear folding badge.
+    """
     clean = strip_ansi(raw).replace("\r\n", "\n").replace("\r", "\n")
-    if len(clean) > max_chars:
-        trimmed = clean[-max_chars:]
-        first_nl = trimmed.find("\n")
+    # Strip HTML tags like <code>, </code>, <i>, </i> so they never leak into the bash box
+    clean = re.sub(r"<[^>]+>", "", clean)
+    # Unescape html entities so code block displays natural symbols
+    clean = html.unescape(clean)
+
+    raw_lines = clean.splitlines()
+    collapsed = collapse_consecutive_lines(raw_lines)
+    if not collapsed:
+        return ""
+
+    truncated_count = 0
+    if len(collapsed) > max_lines:
+        truncated_count = len(collapsed) - max_lines
+        collapsed = collapsed[-max_lines:]
+
+    result = "\n".join(collapsed)
+
+    if len(result) > max_chars:
+        result = result[-max_chars:]
+        first_nl = result.find("\n")
         if first_nl != -1 and first_nl < 120:
-            trimmed = trimmed[first_nl + 1 :]
-        clean = "... [earlier terminal output truncated] ...\n" + trimmed
-    return clean
+            result = result[first_nl + 1 :]
+        truncated_count = max(1, truncated_count)
+
+    if truncated_count > 0:
+        return f"... [earlier terminal output truncated] ... ({truncated_count} earlier steps)\n{result}"
+
+    return result
 
 
 class HybridStreamSession:

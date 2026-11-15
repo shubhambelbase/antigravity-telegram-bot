@@ -83,17 +83,17 @@ class AdaptiveProgressTracker:
         return frame
 
     def _add_activity(self, text: str):
-        """Adds a clean distinct activity to the current activity list."""
-        clean = text.strip()
+        """Adds a clean distinct activity to the current activity list, stripping any raw markup."""
+        clean = re.sub(r"<[^>]+>", "", text).strip()
         if not clean:
             return
         # Avoid immediate duplicate
         if self.activities and self.activities[-1] == clean:
             return
         self.activities.append(clean)
-        # Keep recent activities (up to 4)
-        if len(self.activities) > 4:
-            self.activities = self.activities[-4:]
+        # Keep recent activities (up to 3 for compact display)
+        if len(self.activities) > 3:
+            self.activities = self.activities[-3:]
 
     def _recalculate(self):
         """Recalculates progress percentage with dynamic weights and monotonic non-decreasing guarantee."""
@@ -200,7 +200,8 @@ class AdaptiveProgressTracker:
 
     def feed_line(self, line: str):
         """Parses a terminal or activity output line and updates progress states automatically."""
-        clean = line.strip()
+        # Strip HTML tags so patterns match clean text regardless of markup
+        clean = re.sub(r"<[^>]+>", "", line).strip()
         if not clean:
             return
 
@@ -217,9 +218,12 @@ class AdaptiveProgressTracker:
             return
 
         # 3. File Exploring
-        if "read_file" in clean or "search_web" in clean:
-            m = re.search(r"read_file\s*\(([^)]+)\)", clean)
-            target = m.group(1) if m else "workspace"
+        if clean.startswith("● Read:") or clean.startswith("Read:") or "read_file" in clean or "search_web" in clean:
+            if clean.startswith("● Read:") or clean.startswith("Read:"):
+                target = clean.split(":", 1)[1].strip()
+            else:
+                m = re.search(r"read_file\s*\(([^)]+)\)", clean)
+                target = m.group(1) if m else "workspace"
             self.record_exploring(target)
             return
 
