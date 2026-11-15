@@ -544,6 +544,11 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Waiting for live tool execution logs...\n"
             )
             return
+        else:
+            session.feed(
+                f"⚠️ Direct console injection failed on PID {interactive_pid}.\n"
+                f"Automatically falling back to autonomous runner...\n\n"
+            )
 
     # 4. Headless execution fallback
     if runner.is_running:
@@ -557,15 +562,17 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     assert stream_manager is not None
     session_title = f"Antigravity Session ({runner.conversation_id[:8]}...)" if runner.conversation_id else "Antigravity Session"
 
-    # Step 1: Session starts -> Send persistent message and store chat_id and message_id
-    session = await stream_manager.start_session(
-        chat_id=chat_id,
-        title=session_title,
-        initial_status="Started",
-        initial_prompt=user_prompt,
-        edit_interval=1.0,
-        buffer_debounce=0.5,
-    )
+    # Step 1: Session starts -> Send persistent message if not already active
+    session = stream_manager.get_session(chat_id)
+    if not session or not session.is_active:
+        session = await stream_manager.start_session(
+            chat_id=chat_id,
+            title=session_title,
+            initial_status="Started",
+            initial_prompt=user_prompt,
+            edit_interval=1.0,
+            buffer_debounce=0.5,
+        )
 
     # Step 2 & 3 & 4: Output arrives continuously from process -> buffered & edited ~1s
     result = await runner.execute_prompt(user_prompt, on_chunk=session.feed)
