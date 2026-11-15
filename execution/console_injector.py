@@ -8,11 +8,15 @@ and WriteConsoleInputW APIs with precision hardware scan codes and pacing.
 import ctypes
 from ctypes import wintypes
 import logging
+import sys
+import threading
 import time
 from typing import Optional
 import psutil
 
 logger = logging.getLogger(__name__)
+
+_console_lock = threading.Lock()
 
 kernel32 = ctypes.windll.kernel32
 user32 = ctypes.windll.user32
@@ -116,8 +120,40 @@ def find_interactive_agy_pid() -> Optional[int]:
     return candidates[0].info["pid"]
 
 
-def _build_char_records(ch: str):
-    """Builds paired KeyDown and KeyUp INPUT_RECORDs for a character."""
+def _get_input_records_for_char(ch: str):
+    """Builds paired KeyDown and KeyUp INPUT_RECORDs for a character.
+    Handles UTF-16 surrogate pairs for characters outside BMP (> 0xFFFF), e.g. emojis.
+    Returns a list of (rec_down, rec_up) tuples.
+    """
+    if ord(ch) > 0xFFFF:
+        # Non-BMP character (e.g. emoji like '\U0001f517' or link symbols)
+        utf16_bytes = ch.encode("utf-16-le")
+        wchar_chars = [
+            chr(int.from_bytes(utf16_bytes[0:2], "little")),
+            chr(int.from_bytes(utf16_bytes[2:4], "little")),
+        ]
+        results = []
+        for wch in wchar_chars:
+            rec_down = INPUT_RECORD()
+            rec_down.EventType = KEY_EVENT
+            rec_down.Event.KeyEvent.bKeyDown = True
+            rec_down.Event.KeyEvent.wRepeatCount = 1
+            rec_down.Event.KeyEvent.UnicodeChar = wch
+            rec_down.Event.KeyEvent.wVirtualKeyCode = 0
+            rec_down.Event.KeyEvent.wVirtualScanCode = 0
+            rec_down.Event.KeyEvent.dwControlKeyState = 0
+
+            rec_up = INPUT_RECORD()
+            rec_up.EventType = KEY_EVENT
+            rec_up.Event.KeyEvent.bKeyDown = False
+            rec_up.Event.KeyEvent.wRepeatCount = 1
+            rec_up.Event.KeyEvent.UnicodeChar = wch
+            rec_up.Event.KeyEvent.wVirtualKeyCode = 0
+            rec_up.Event.KeyEvent.wVirtualScanCode = 0
+            rec_up.Event.KeyEvent.dwControlKeyState = 0
+            results.append((rec_down, rec_up))
+        return results
+
     if ch == "\r":
         vk = 0x0D
         scan = 0x1C
@@ -131,7 +167,11 @@ def _build_char_records(ch: str):
         scan = 0x0F
         ctrl_state = 0
     else:
-        scan_res = user32.VkKeyScanW(ch)
+        try:
+            scan_res = user32.VkKeyScanW(ch)
+        except Exception:
+            scan_res = -1
+
         if scan_res != -1:
             vk = scan_res & 0xFF
             shift_state = (scan_res >> 8) & 0xFF
@@ -168,11 +208,19 @@ def _build_char_records(ch: str):
     rec_up.Event.KeyEvent.wVirtualScanCode = scan
     rec_up.Event.KeyEvent.dwControlKeyState = ctrl_state
 
-    return rec_down, rec_up
+    return [(rec_down, rec_up)]
+
+
+def _build_char_records(ch: str):
+    """Backward-compatible helper returning the primary (rec_down, rec_up) pair for a character."""
+    pairs = _get_input_records_for_char(ch)
+    return pairs[0]
 
 
 def inject_text_to_agy(text: str, pid: Optional[int] = None) -> bool:
-    """Injects text + Enter into the interactive agy console window with robust pacing."""
+    """Injects text + Enter into the interactive agy console window with robust pacing.
+    Guarantees that console is detached BEFORE any logging so bot logs never leak into target terminal.
+    """
     target_pid = pid or find_interactive_agy_pid()
     if not target_pid:
         logger.warning("No interactive agy process found.")
@@ -183,98 +231,114 @@ def inject_text_to_agy(text: str, pid: Optional[int] = None) -> bool:
     if not clean_text:
         return False
 
-    kernel32.FreeConsole()
-    if not kernel32.AttachConsole(target_pid):
-        err = kernel32.GetLastError()
-        logger.warning(f"Failed to AttachConsole to PID {target_pid}: error code {err}")
+    # Pre-build all input records in memory before attaching to console
+    input_records = []
+    try:
+        for ch in clean_text:
+            for rec_down, rec_up in _get_input_records_for_char(ch):
+                input_records.append((rec_down, rec_up))
+    except Exception as e:
+        logger.error(f"Failed to prepare input records for prompt: {e}")
         return False
 
-    try:
-        # Focus/wake the console window if available
-        hwnd = kernel32.GetConsoleWindow()
-        if hwnd:
-            try:
-                user32.SetForegroundWindow(hwnd)
-            except Exception:
-                pass
+    success = False
+    err_message = None
+    total_chars_written = 0
 
-        h_conin = kernel32.CreateFileW(
-            "CONIN$",
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            0,
-            None,
-        )
-        if h_conin == INVALID_HANDLE_VALUE or not h_conin:
-            logger.warning("Failed to open CONIN$ for console writing.")
+    with _console_lock:
+        kernel32.FreeConsole()
+        if not kernel32.AttachConsole(target_pid):
+            err = kernel32.GetLastError()
+            logger.warning(f"Failed to AttachConsole to PID {target_pid}: error code {err}")
             return False
 
-        # Paced character injection: write characters in small paced batches
-        # to ensure Go Bubbletea's input event slice never drops rapid bursts
-        total_chars_written = 0
-        written_count = wintypes.DWORD()
+        h_conin = None
+        try:
+            # Focus/wake the console window if available
+            hwnd = kernel32.GetConsoleWindow()
+            if hwnd:
+                try:
+                    user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
 
-        for ch in clean_text:
-            rec_down, rec_up = _build_char_records(ch)
-            pair_type = INPUT_RECORD * 2
-            pair = pair_type(rec_down, rec_up)
-            ok = kernel32.WriteConsoleInputW(h_conin, pair, 2, ctypes.byref(written_count))
-            if ok:
-                total_chars_written += 1
-            # Micro-pause between characters (2ms) prevents buffer overflow in Go channel
-            time.sleep(0.003)
+            h_conin = kernel32.CreateFileW(
+                "CONIN$",
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+            if h_conin == INVALID_HANDLE_VALUE or not h_conin:
+                err_message = "Failed to open CONIN$ for console writing."
+            else:
+                written_count = wintypes.DWORD()
+                pair_type = INPUT_RECORD * 2
 
-        if total_chars_written == 0:
-            logger.warning("Zero characters were written to CONIN$.")
-            kernel32.CloseHandle(h_conin)
-            return False
+                for rec_down, rec_up in input_records:
+                    pair = pair_type(rec_down, rec_up)
+                    ok = kernel32.WriteConsoleInputW(h_conin, pair, 2, ctypes.byref(written_count))
+                    if ok:
+                        total_chars_written += 1
+                    time.sleep(0.003)
 
-        # Allow Bubbletea textinput component 80ms to finish redrawing before Enter
-        time.sleep(0.08)
+                if total_chars_written > 0:
+                    # Allow Bubbletea textinput component to finish redrawing before Enter
+                    time.sleep(0.06)
 
-        # Send Enter KeyDown with hardware scan code 0x1C (VK_RETURN)
-        ret_down = INPUT_RECORD()
-        ret_down.EventType = KEY_EVENT
-        ret_down.Event.KeyEvent.bKeyDown = True
-        ret_down.Event.KeyEvent.wRepeatCount = 1
-        ret_down.Event.KeyEvent.UnicodeChar = "\r"
-        ret_down.Event.KeyEvent.wVirtualKeyCode = 0x0D
-        ret_down.Event.KeyEvent.wVirtualScanCode = 0x1C
-        ret_down.Event.KeyEvent.dwControlKeyState = 0
+                    # Send Enter KeyDown with hardware scan code 0x1C (VK_RETURN)
+                    ret_down = INPUT_RECORD()
+                    ret_down.EventType = KEY_EVENT
+                    ret_down.Event.KeyEvent.bKeyDown = True
+                    ret_down.Event.KeyEvent.wRepeatCount = 1
+                    ret_down.Event.KeyEvent.UnicodeChar = "\r"
+                    ret_down.Event.KeyEvent.wVirtualKeyCode = 0x0D
+                    ret_down.Event.KeyEvent.wVirtualScanCode = 0x1C
+                    ret_down.Event.KeyEvent.dwControlKeyState = 0
 
-        single_type = INPUT_RECORD * 1
-        arr_ret_down = single_type(ret_down)
-        kernel32.WriteConsoleInputW(h_conin, arr_ret_down, 1, ctypes.byref(written_count))
+                    single_type = INPUT_RECORD * 1
+                    arr_ret_down = single_type(ret_down)
+                    kernel32.WriteConsoleInputW(h_conin, arr_ret_down, 1, ctypes.byref(written_count))
 
-        # Hold Enter down for 30ms to guarantee event registration
-        time.sleep(0.03)
+                    time.sleep(0.02)
 
-        # Send Enter KeyUp
-        ret_up = INPUT_RECORD()
-        ret_up.EventType = KEY_EVENT
-        ret_up.Event.KeyEvent.bKeyDown = False
-        ret_up.Event.KeyEvent.wRepeatCount = 1
-        ret_up.Event.KeyEvent.UnicodeChar = "\r"
-        ret_up.Event.KeyEvent.wVirtualKeyCode = 0x0D
-        ret_up.Event.KeyEvent.wVirtualScanCode = 0x1C
-        ret_up.Event.KeyEvent.dwControlKeyState = 0
+                    # Send Enter KeyUp
+                    ret_up = INPUT_RECORD()
+                    ret_up.EventType = KEY_EVENT
+                    ret_up.Event.KeyEvent.bKeyDown = False
+                    ret_up.Event.KeyEvent.wRepeatCount = 1
+                    ret_up.Event.KeyEvent.UnicodeChar = "\r"
+                    ret_up.Event.KeyEvent.wVirtualKeyCode = 0x0D
+                    ret_up.Event.KeyEvent.wVirtualScanCode = 0x1C
+                    ret_up.Event.KeyEvent.dwControlKeyState = 0
 
-        arr_ret_up = single_type(ret_up)
-        kernel32.WriteConsoleInputW(h_conin, arr_ret_up, 1, ctypes.byref(written_count))
+                    arr_ret_up = single_type(ret_up)
+                    kernel32.WriteConsoleInputW(h_conin, arr_ret_up, 1, ctypes.byref(written_count))
+                    time.sleep(0.02)
+                    success = True
+                else:
+                    err_message = "Zero characters were written to CONIN$."
+        except Exception as e:
+            err_message = f"Exception during console injection: {e}"
+        finally:
+            if h_conin and h_conin != INVALID_HANDLE_VALUE:
+                try:
+                    kernel32.CloseHandle(h_conin)
+                except Exception:
+                    pass
+            # CRITICAL: Detach console BEFORE any logging to prevent log leak into target terminal
+            kernel32.FreeConsole()
 
-        time.sleep(0.04)
-        kernel32.CloseHandle(h_conin)
+    # Log results safely outside of the attached console
+    if success:
         logger.info(f"Successfully injected {total_chars_written} chars + Enter into PID {target_pid}")
         return True
-
-    except Exception as e:
-        logger.error(f"Exception during console injection: {e}", exc_info=True)
+    else:
+        if err_message:
+            logger.warning(err_message)
         return False
-
-    finally:
-        kernel32.FreeConsole()
 
 
 def inject_special_key(key_name: str, pid: Optional[int] = None) -> bool:
@@ -313,62 +377,76 @@ def inject_special_key(key_name: str, pid: Optional[int] = None) -> bool:
         return False
 
     vk, scan, uchar, ctrl_state = VK_MAP[name]
+    success = False
+    err_message = None
 
-    kernel32.FreeConsole()
-    if not kernel32.AttachConsole(target_pid):
-        logger.warning(f"Failed to AttachConsole to PID {target_pid}")
-        return False
-
-    try:
-        h_conin = kernel32.CreateFileW(
-            "CONIN$",
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            0,
-            None,
-        )
-        if h_conin == INVALID_HANDLE_VALUE or not h_conin:
+    with _console_lock:
+        kernel32.FreeConsole()
+        if not kernel32.AttachConsole(target_pid):
+            logger.warning(f"Failed to AttachConsole to PID {target_pid}")
             return False
 
-        written = wintypes.DWORD()
-        single_type = INPUT_RECORD * 1
+        h_conin = None
+        try:
+            h_conin = kernel32.CreateFileW(
+                "CONIN$",
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+            if h_conin != INVALID_HANDLE_VALUE and h_conin:
+                written = wintypes.DWORD()
+                single_type = INPUT_RECORD * 1
 
-        # KeyDown
-        rec_down = INPUT_RECORD()
-        rec_down.EventType = KEY_EVENT
-        rec_down.Event.KeyEvent.bKeyDown = True
-        rec_down.Event.KeyEvent.wRepeatCount = 1
-        rec_down.Event.KeyEvent.UnicodeChar = uchar
-        rec_down.Event.KeyEvent.wVirtualKeyCode = vk
-        rec_down.Event.KeyEvent.wVirtualScanCode = scan
-        rec_down.Event.KeyEvent.dwControlKeyState = ctrl_state
-        arr_down = single_type(rec_down)
-        kernel32.WriteConsoleInputW(h_conin, arr_down, 1, ctypes.byref(written))
+                # KeyDown
+                rec_down = INPUT_RECORD()
+                rec_down.EventType = KEY_EVENT
+                rec_down.Event.KeyEvent.bKeyDown = True
+                rec_down.Event.KeyEvent.wRepeatCount = 1
+                rec_down.Event.KeyEvent.UnicodeChar = uchar
+                rec_down.Event.KeyEvent.wVirtualKeyCode = vk
+                rec_down.Event.KeyEvent.wVirtualScanCode = scan
+                rec_down.Event.KeyEvent.dwControlKeyState = ctrl_state
+                arr_down = single_type(rec_down)
+                kernel32.WriteConsoleInputW(h_conin, arr_down, 1, ctypes.byref(written))
 
-        time.sleep(0.03)
+                time.sleep(0.02)
 
-        # KeyUp
-        rec_up = INPUT_RECORD()
-        rec_up.EventType = KEY_EVENT
-        rec_up.Event.KeyEvent.bKeyDown = False
-        rec_up.Event.KeyEvent.wRepeatCount = 1
-        rec_up.Event.KeyEvent.UnicodeChar = uchar
-        rec_up.Event.KeyEvent.wVirtualKeyCode = vk
-        rec_up.Event.KeyEvent.wVirtualScanCode = scan
-        rec_up.Event.KeyEvent.dwControlKeyState = ctrl_state
-        arr_up = single_type(rec_up)
-        kernel32.WriteConsoleInputW(h_conin, arr_up, 1, ctypes.byref(written))
+                # KeyUp
+                rec_up = INPUT_RECORD()
+                rec_up.EventType = KEY_EVENT
+                rec_up.Event.KeyEvent.bKeyDown = False
+                rec_up.Event.KeyEvent.wRepeatCount = 1
+                rec_up.Event.KeyEvent.UnicodeChar = uchar
+                rec_up.Event.KeyEvent.wVirtualKeyCode = vk
+                rec_up.Event.KeyEvent.wVirtualScanCode = scan
+                rec_up.Event.KeyEvent.dwControlKeyState = ctrl_state
+                arr_up = single_type(rec_up)
+                kernel32.WriteConsoleInputW(h_conin, arr_up, 1, ctypes.byref(written))
 
-        time.sleep(0.02)
-        kernel32.CloseHandle(h_conin)
+                time.sleep(0.02)
+                success = True
+            else:
+                err_message = "Failed to open CONIN$ for special key writing."
+        except Exception as e:
+            err_message = f"Error injecting special key: {e}"
+        finally:
+            if h_conin and h_conin != INVALID_HANDLE_VALUE:
+                try:
+                    kernel32.CloseHandle(h_conin)
+                except Exception:
+                    pass
+            # Detach console BEFORE any logging
+            kernel32.FreeConsole()
+
+    if success:
         logger.info(f"Injected special key '{name}' to PID {target_pid}")
         return True
-
-    except Exception as e:
-        logger.error(f"Error injecting special key: {e}")
+    else:
+        if err_message:
+            logger.warning(err_message)
         return False
-    finally:
-        kernel32.FreeConsole()
 

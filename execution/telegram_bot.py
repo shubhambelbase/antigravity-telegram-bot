@@ -49,6 +49,12 @@ from execution.stream_manager import TerminalStreamManager, collapse_consecutive
 from execution.transcript_watcher import TranscriptWatcher
 
 # Configure logging
+logging.raiseExceptions = False
+
+# Silence noisy network libraries (prevents spamming HTTP 200 OK every second)
+for _noisy_mod in ("httpx", "httpcore", "telegram", "telegram.ext", "apscheduler"):
+    logging.getLogger(_noisy_mod).setLevel(logging.WARNING)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,

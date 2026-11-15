@@ -29,9 +29,9 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `run_bot.bat`: Windows single-click launcher with auto-healing installer fallback.
   - `start_bot_silent.vbs`: Windowless background launcher used by auto-start and startup shortcut.
   - `enable_autostart.bat` / `disable_autostart.bat`: 1-click Windows auto-start toggle scripts.
-  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs 46 verification tests, copies `.env.example`, pauses at end).
+  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs 47 verification tests, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.
-- `tests/` - Unit tests (46 passed):
+- `tests/` - Unit tests (47 passed):
   - `test_autostart.py`: Tests Windows Startup folder resolution, shortcut creation, enable/disable operations.
   - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, and pause/resume live sync toggle.
   - `test_progress_tracker.py`: Tests Mode A (indeterminate), Mode B (activity-based), Mode C (determinate), monotonic non-decreasing progress, 95% cap rule, pytest line integration, and markup stripping in activities.
@@ -71,5 +71,5 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - Double-click `setup\enable_autostart.bat` or `setup\disable_autostart.bat`.
 
 ## Status & Next Steps
-- Status: Windows Auto-Start configured and enabled on laptop startup (runs silently in background via start_bot_silent.vbs). All 46 unit tests passing (100% success). Daemon active and polling.
+- Status: Windows Auto-Start configured and enabled on laptop startup (runs silently in background via start_bot_silent.vbs). All 47 unit tests passing (100% success). Daemon active and polling.
 - Last updated: 2026-11-15.

@@ -76,7 +76,7 @@ git clone https://github.com/shubhambelbase/antigravity-telegram-bot.git
 cd antigravity-telegram-bot
 setup\install.bat
 ```
-*(The installer sets up your `.venv`, installs requirements, runs 46 unit tests, and creates your `.env` configuration file).*
+*(The installer sets up your `.venv`, installs requirements, runs 47 unit tests, and creates your `.env` configuration file).*
 
 ### 4. Configure & Launch
 1. Open `.env` and paste your bot token:
@@ -128,7 +128,7 @@ python -m pytest tests/
 ```
 Output:
 ```text
-============================= 46 passed in 7.01s =============================
+============================= 47 passed in 6.61s =============================
 ```
 
 ---

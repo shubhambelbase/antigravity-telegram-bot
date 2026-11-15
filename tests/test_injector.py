@@ -55,3 +55,24 @@ def test_build_char_records_special_keys():
     rec_back, _ = _build_char_records("\b")
     assert rec_back.Event.KeyEvent.wVirtualKeyCode == 0x08
     assert rec_back.Event.KeyEvent.wVirtualScanCode == 0x0E
+
+
+def test_build_char_records_emoji_and_non_bmp():
+    # Test non-BMP character like '\U0001f517' (link symbol)
+    from execution.console_injector import _get_input_records_for_char
+    pairs = _get_input_records_for_char("\U0001f517")
+    assert len(pairs) == 2  # High and low surrogate pair
+    
+    # First surrogate
+    down1, up1 = pairs[0]
+    assert bool(down1.Event.KeyEvent.bKeyDown) is True
+    assert bool(up1.Event.KeyEvent.bKeyDown) is False
+    assert ord(down1.Event.KeyEvent.UnicodeChar) == 0xD83D
+    
+    # Second surrogate
+    down2, up2 = pairs[1]
+    assert ord(down2.Event.KeyEvent.UnicodeChar) == 0xDD17
+
+    # Backward compatibility with _build_char_records
+    rec_down, rec_up = _build_char_records("\U0001f517")
+    assert ord(rec_down.Event.KeyEvent.UnicodeChar) == 0xD83D

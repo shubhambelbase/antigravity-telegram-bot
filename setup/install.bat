@@ -141,14 +141,14 @@ echo [OK] All dependencies successfully installed into isolated environment.
 echo.
 
 REM ----------------------------------------------------
-REM Step 4: Run Automated Verification Suite (46 Tests)
+REM Step 4: Run Automated Verification Suite (47 Tests)
 REM ----------------------------------------------------
 echo [*] Running automated self-tests to verify system compatibility...
 ".venv\Scripts\python.exe" -m pytest tests/ --quiet
 if errorlevel 1 (
     echo [WARNING] Some self-tests produced warnings. Check tests/ for details.
 ) else (
-    echo [OK] All 46 automated unit tests passed with 100%% success.
+    echo [OK] All 47 automated unit tests passed with 100%% success.
 )
 echo.
 
