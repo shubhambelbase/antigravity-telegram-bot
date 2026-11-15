@@ -1,7 +1,7 @@
 # Project Context: Antigravity Telegram Bot
 
 ## Overview
-A lightweight, reliable, autonomous Telegram remote control center for Google Antigravity CLI (`agy`). Features real-time CLI connection detection, normal command execution, interactive prompts (Yes / No / Select / Navigation keys), live hybrid streaming output with 1-second edits, desktop screen snapshotting with WinSta0 desktop attachment, and full session history / logs inspection.
+A lightweight, reliable, autonomous Telegram remote control center for Google Antigravity CLI (`agy`). Features real-time CLI connection detection, normal command execution, interactive prompts (Yes / No / Select / Navigation keys), live hybrid streaming output with 1-second edits, desktop screen snapshotting with WinSta0 desktop attachment, interactive Telegram workspace browser (`/cd`, `/pwd`, `/mkdir`), and full session history / logs inspection.
 
 ## Stack & Environment
 - **OS**: Windows
@@ -17,20 +17,21 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `screenshot.py`: Desktop screen capture utility (WinSta0 / desktop attachment, PIL ImageGrab, Win32 GDI BitBlt) with blank/transparency validation (`is_blank_or_invalid_image`) and high-fidelity dark-mode terminal window snapshot renderer fallback.
   - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Maintains persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, and separate event notifications for completions/errors.
   - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, and extracting tool calls/thoughts.
-  - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), non-zero return code failure tracking, and logs export (`get_session_log_export`).
-  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, callback query message resolvers, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
+  - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), workspace resolution, subdirectory listing, parent tracking, system drive discovery, and recent workspaces history.
+  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
 - `setup/` - Automated setup & guides:
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs test suite, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Complete step-by-step documentation for users cloning the repo.
-- `tests/` - Unit tests (29 passed):
+- `tests/` - Unit tests (33 passed):
+  - `test_workspace.py`: Tests interactive workspace browser cards, child folder buttons, and system drive selection menus.
   - `test_screenshot.py`: Tests screenshot capture, WinSta0 attachment, blank/transparent validation, and terminal snapshot rendering.
   - `test_stream_manager.py`: Tests ANSI stripping, terminal windowing, 500ms buffer accumulation, ~1.0s periodic edits, completion events, error/cancel events.
-  - `test_runner.py`: Tests runner initialization, workspace switching, session resets, conversation discovery, turn extraction, and log export.
+  - `test_runner.py`: Tests runner initialization, relative/absolute workspace switching, folder creation, subdirectory inspection, parent directory retrieval, and session logs export.
   - `test_formatter.py`: Tests Markdown-to-HTML conversion.
   - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, and dispatching.
   - `test_injector.py`: Tests process detection, alphanumeric/symbol/space key event records, special keys (Yes/No/Select/Arrows/Ctrl+C), scan codes, and injection safety fallback.
-- `.tmp/` - Temporary files and process run logs.
+- `.tmp/` - Temporary files, recent workspaces ledger (`recent_workspaces.json`), and process run logs.
 - `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
 - `run_bot.bat` - Windows single-click launcher.
 - `install.bat` - Root wrapper for `setup/install.bat`.
@@ -45,6 +46,11 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `[ 1️⃣ Select 1 ]` `[ 2️⃣ Select 2 ]` `[ 3️⃣ Select 3 ]`
 - `[ 🛑 Ctrl+C ]` `[ ⌫ Backspace ]` `[ 📸 Screenshot ]`
 
+## Workspace Commands & Navigation
+- `[ 📁 PWD ]` or `/pwd` / `/workspace`: Opens interactive folder browser with parent, child folders, drives, and recent workspaces.
+- `/cd <path>` or `cd <path>`: Switches workspace (supports relative `..`, `subfolder`, or absolute `E:\project`).
+- `/mkdir <path>`: Creates a directory and immediately switches workspace into it.
+
 ## Status & Next Steps
-- Status: Fixed blank white screenshot issue via WinSta0/default desktop attachment, Win32 GDI BitBlt capture, and pixel blank/transparency validation fallback. All 29 unit tests passing (100% success). Daemon active and polling.
+- Status: Interactive Workspace Browser fully integrated into Telegram. All 33 unit tests passing (100% success). Daemon active and polling.
 - Last updated: 2026-11-15.

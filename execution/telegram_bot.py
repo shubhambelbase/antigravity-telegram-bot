@@ -420,6 +420,98 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.args = [conv_id]
         await cmd_logs(update, context)
 
+    # 4. Workspace Navigation
+    elif data.startswith("ws:"):
+        ws_action = data.split("ws:", 1)[1]
+        if ws_action == "up":
+            parent = runner.get_parent_workspace()
+            if parent:
+                runner.set_workspace(parent)
+                await query.answer(f"Switched to {os.path.basename(parent) or parent}")
+                text, markup = build_workspace_view(runner)
+                await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+            else:
+                await query.answer("Already at drive root", show_alert=True)
+            return
+
+        elif ws_action.startswith("sub:"):
+            try:
+                idx = int(ws_action.split("sub:", 1)[1])
+                subdirs = runner.get_workspace_subdirs(limit=6)
+                if 0 <= idx < len(subdirs):
+                    chosen = subdirs[idx]
+                    runner.set_workspace(chosen)
+                    await query.answer(f"Switched to {chosen}")
+                    text, markup = build_workspace_view(runner)
+                    await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+                else:
+                    await query.answer("Folder not found", show_alert=True)
+            except Exception as e:
+                logger.debug(f"Subdir switch error: {e}")
+            return
+
+        elif ws_action.startswith("rec:"):
+            try:
+                idx = int(ws_action.split("rec:", 1)[1])
+                other_recents = [
+                    p for p in runner.recent_workspaces
+                    if os.path.abspath(p) != os.path.abspath(runner.workspace_dir)
+                ][:2]
+                if 0 <= idx < len(other_recents):
+                    chosen = other_recents[idx]
+                    runner.set_workspace(chosen)
+                    await query.answer(f"Switched to {os.path.basename(chosen) or chosen}")
+                    text, markup = build_workspace_view(runner)
+                    await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+                else:
+                    await query.answer("Recent workspace not found", show_alert=True)
+            except Exception as e:
+                logger.debug(f"Recent switch error: {e}")
+            return
+
+        elif ws_action == "drives":
+            await query.answer()
+            text, markup = build_drives_view(runner)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+            return
+
+        elif ws_action.startswith("drive:"):
+            letter = ws_action.split("drive:", 1)[1]
+            drive_path = f"{letter}:\\"
+            if runner.set_workspace(drive_path):
+                await query.answer(f"Switched to {drive_path}")
+                text, markup = build_workspace_view(runner)
+                await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+            else:
+                await query.answer(f"Drive {drive_path} not accessible", show_alert=True)
+            return
+
+        elif ws_action == "mkdir":
+            pending = context.user_data.get("pending_mkdir")
+            if pending and runner.create_and_set_workspace(pending):
+                context.user_data.pop("pending_mkdir", None)
+                await query.answer("Directory created!")
+                text, markup = build_workspace_view(runner)
+                await query.edit_message_text(
+                    f"📁 <b>Created & switched to workspace:</b>\n<code>{html.escape(runner.workspace_dir)}</code>\n\n{text}",
+                    reply_markup=markup,
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await query.answer("Could not create directory", show_alert=True)
+            return
+
+        elif ws_action == "refresh":
+            await query.answer("Refreshed")
+            text, markup = build_workspace_view(runner)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+            return
+
+        elif ws_action == "close":
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+
 
 async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
@@ -539,13 +631,100 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+def build_workspace_view(runner_instance: AntigravityRunner) -> Tuple[str, InlineKeyboardMarkup]:
+    """Builds an interactive workspace navigation card with inline folder buttons."""
+    current = runner_instance.workspace_dir
+    parent = runner_instance.get_parent_workspace()
+    subdirs = runner_instance.get_workspace_subdirs(limit=6)
+
+    text = (
+        f"📁 <b>Active Workspace:</b>\n"
+        f"<code>{html.escape(current)}</code>\n\n"
+        f"📂 <b>Folder Navigation:</b>\n"
+        f"<i>Tap any folder to enter, or send <code>/cd &lt;path&gt;</code></i>"
+    )
+
+    keyboard: List[List[InlineKeyboardButton]] = []
+
+    # 1. Parent directory button
+    if parent:
+        parent_name = os.path.basename(parent) or parent
+        keyboard.append([InlineKeyboardButton(f"📂 ⬆️ Parent ({parent_name})", callback_data="ws:up")])
+
+    # 2. Child directories (2 per row)
+    row: List[InlineKeyboardButton] = []
+    for idx, folder in enumerate(subdirs):
+        display = folder if len(folder) <= 18 else folder[:16] + ".."
+        row.append(InlineKeyboardButton(f"📁 {display}", callback_data=f"ws:sub:{idx}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    # 3. Recent workspaces (up to 2)
+    other_recents = [
+        p for p in runner_instance.recent_workspaces
+        if os.path.abspath(p) != os.path.abspath(current)
+    ][:2]
+    for idx, rpath in enumerate(other_recents):
+        rname = os.path.basename(rpath) or rpath
+        keyboard.append([InlineKeyboardButton(f"🕒 Switch: {rname}", callback_data=f"ws:rec:{idx}")])
+
+    # 4. System drives & tools
+    keyboard.append([
+        InlineKeyboardButton("💾 Drives", callback_data="ws:drives"),
+        InlineKeyboardButton("🔄 Refresh", callback_data="ws:refresh"),
+        InlineKeyboardButton("❌ Close", callback_data="ws:close"),
+    ])
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+def build_drives_view(runner_instance: AntigravityRunner) -> Tuple[str, InlineKeyboardMarkup]:
+    """Builds drive selection keyboard."""
+    drives = runner_instance.get_available_drives()
+    text = (
+        f"💾 <b>Available System Drives:</b>\n"
+        f"Current: <code>{html.escape(runner_instance.workspace_dir)}</code>\n\n"
+        f"<i>Tap a drive to switch workspace:</i>"
+    )
+
+    keyboard: List[List[InlineKeyboardButton]] = []
+    drive_row: List[InlineKeyboardButton] = []
+    for drive in drives:
+        letter = drive.replace(":\\", "").replace(":", "").replace("\\", "").strip()
+        drive_row.append(InlineKeyboardButton(f"💾 {drive}", callback_data=f"ws:drive:{letter}"))
+        if len(drive_row) == 3:
+            keyboard.append(drive_row)
+            drive_row = []
+    if drive_row:
+        keyboard.append(drive_row)
+
+    keyboard.append([InlineKeyboardButton("🔙 Back to Workspace", callback_data="ws:refresh")])
+    return text, InlineKeyboardMarkup(keyboard)
+
+
 async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
+    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        return
+
     if not context.args:
-        await update.message.reply_text(
-            "Usage: <code>/cd &lt;path&gt;</code>",
+        text, markup = build_workspace_view(runner)
+        await msg.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+        return
+
+    if runner.is_running:
+        await msg.reply_text(
+            "⚠️ An Antigravity task is currently executing. Use /stop first before changing workspace.",
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
@@ -553,16 +732,29 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_path = " ".join(context.args).strip('"').strip("'")
     if runner.set_workspace(target_path):
-        await update.message.reply_text(
-            f"📁 Workspace switched to:\n<code>{html.escape(runner.workspace_dir)}</code>",
+        text, markup = build_workspace_view(runner)
+        header = (
+            f"✅ <b>Workspace switched to:</b>\n"
+            f"<code>{html.escape(runner.workspace_dir)}</code>\n\n"
+            f"<i>Next prompts will execute in this directory with a clean session.</i>\n\n"
+        )
+        await msg.reply_text(
+            f"{header}{text}",
             parse_mode=ParseMode.HTML,
-            reply_markup=QUICK_ACTION_KEYBOARD,
+            reply_markup=markup,
         )
     else:
-        await update.message.reply_text(
-            f"❌ Directory not found:\n<code>{html.escape(target_path)}</code>",
+        resolved = runner.resolve_path(target_path)
+        context.user_data["pending_mkdir"] = resolved
+        mkdir_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Create & Switch Here", callback_data="ws:mkdir")],
+            [InlineKeyboardButton("📁 View Current Workspace", callback_data="ws:refresh")],
+        ])
+        await msg.reply_text(
+            f"❌ <b>Directory not found:</b>\n<code>{html.escape(resolved)}</code>\n\n"
+            f"Would you like to create this directory and switch into it?",
             parse_mode=ParseMode.HTML,
-            reply_markup=QUICK_ACTION_KEYBOARD,
+            reply_markup=mkdir_markup,
         )
 
 
@@ -570,11 +762,46 @@ async def cmd_pwd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    await update.message.reply_text(
-        f"📁 Current Workspace:\n<code>{html.escape(runner.workspace_dir)}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=QUICK_ACTION_KEYBOARD,
-    )
+    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    if msg:
+        text, markup = build_workspace_view(runner)
+        await msg.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+
+async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_auth(update):
+        return
+
+    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        return
+
+    if not context.args:
+        await msg.reply_text(
+            "Usage: <code>/mkdir &lt;folder_name or path&gt;</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=QUICK_ACTION_KEYBOARD,
+        )
+        return
+
+    target_path = " ".join(context.args).strip('"').strip("'")
+    if runner.create_and_set_workspace(target_path):
+        text, markup = build_workspace_view(runner)
+        await msg.reply_text(
+            f"📁 <b>Created & switched to workspace:</b>\n<code>{html.escape(runner.workspace_dir)}</code>\n\n{text}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+    else:
+        await msg.reply_text(
+            f"❌ Failed to create directory: <code>{html.escape(target_path)}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=QUICK_ACTION_KEYBOARD,
+        )
 
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -647,8 +874,13 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif prompt_norm in ("📸 Screenshot", "screenshot"):
         await cmd_screenshot(update, context)
         return
-    elif prompt_norm in ("📁 PWD", "pwd"):
+    elif prompt_norm in ("📁 PWD", "pwd", "workspace", "/workspace"):
         await cmd_pwd(update, context)
+        return
+    elif prompt_norm.lower().startswith("cd ") or prompt_norm.lower() == "cd":
+        target = user_prompt[3:].strip() if prompt_norm.lower().startswith("cd ") else ""
+        context.args = target.split() if target else []
+        await cmd_cd(update, context)
         return
     elif prompt_norm in ("🎮 Controls", "controls", "keypad"):
         await cmd_controls(update, context)
@@ -917,6 +1149,8 @@ def main():
     app.add_handler(CommandHandler("screenshot", cmd_screenshot))
     app.add_handler(CommandHandler("cd", cmd_cd))
     app.add_handler(CommandHandler("pwd", cmd_pwd))
+    app.add_handler(CommandHandler("workspace", cmd_pwd))
+    app.add_handler(CommandHandler("mkdir", cmd_mkdir))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("cancel", cmd_stop))

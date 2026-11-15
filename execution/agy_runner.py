@@ -7,11 +7,15 @@ session persistence, and process termination.
 import asyncio
 import glob
 import json
+import logging
 import os
 import shutil
+import string
 from dataclasses import dataclass
 from datetime import datetime
 from typing import AsyncGenerator, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,22 +42,133 @@ class AntigravityRunner:
             or shutil.which("agy.exe")
             or os.path.expanduser(r"~\AppData\Local\agy\bin\agy.exe")
         )
-        self.workspace_dir = default_workspace or os.getcwd()
+        self.workspace_dir = os.path.abspath(default_workspace or os.getcwd())
         self.conversation_id: Optional[str] = None
         self.current_process: Optional[asyncio.subprocess.Process] = None
         self._lock = asyncio.Lock()
         self._cancelled = False
         self.brain_dir = os.path.expanduser(r"~/.gemini/antigravity-cli/brain")
+        self.recent_workspaces: List[str] = []
+        self._load_recent_workspaces()
+        self._record_workspace(self.workspace_dir)
 
     @property
     def is_running(self) -> bool:
         return self.current_process is not None and self.current_process.returncode is None
 
+    def _recent_workspaces_file(self) -> str:
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), ".tmp", "recent_workspaces.json")
+
+    def _load_recent_workspaces(self) -> None:
+        path = self._recent_workspaces_file()
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    stored = json.load(f)
+                    if isinstance(stored, list):
+                        valid = [p for p in stored if isinstance(p, str) and os.path.isdir(p)]
+                        for p in reversed(valid):
+                            norm = os.path.abspath(p)
+                            if norm not in self.recent_workspaces:
+                                self.recent_workspaces.insert(0, norm)
+                        self.recent_workspaces = self.recent_workspaces[:5]
+        except Exception:
+            pass
+
+    def _save_recent_workspaces(self) -> None:
+        path = self._recent_workspaces_file()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.recent_workspaces[:5], f, indent=2)
+        except Exception:
+            pass
+
+    def _record_workspace(self, path: str) -> None:
+        norm = os.path.abspath(path)
+        if norm in self.recent_workspaces:
+            self.recent_workspaces.remove(norm)
+        self.recent_workspaces.insert(0, norm)
+        self.recent_workspaces = self.recent_workspaces[:5]
+        self._save_recent_workspaces()
+
+    def resolve_path(self, path: str) -> str:
+        """Resolves relative or home paths against the active workspace."""
+        clean = os.path.expanduser(path.strip().strip('"').strip("'"))
+        if not os.path.isabs(clean):
+            return os.path.abspath(os.path.join(self.workspace_dir, clean))
+        return os.path.abspath(clean)
+
     def set_workspace(self, path: str) -> bool:
-        if os.path.isdir(path):
-            self.workspace_dir = os.path.abspath(path)
+        """Switches the active workspace directory (resolving relative paths)."""
+        if not path or not path.strip():
+            return False
+        target = self.resolve_path(path)
+        if os.path.isdir(target):
+            self.workspace_dir = target
+            self.conversation_id = None  # Fresh session in new workspace
+            self._record_workspace(target)
             return True
         return False
+
+    def create_and_set_workspace(self, path: str) -> bool:
+        """Creates a directory if missing and switches workspace into it."""
+        if not path or not path.strip():
+            return False
+        target = self.resolve_path(path)
+        try:
+            os.makedirs(target, exist_ok=True)
+            self.workspace_dir = target
+            self.conversation_id = None
+            self._record_workspace(target)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create workspace directory {target}: {e}")
+            return False
+
+    def get_workspace_subdirs(self, limit: int = 6) -> List[str]:
+        """Returns immediate non-hidden child directories in current workspace."""
+        try:
+            if not os.path.isdir(self.workspace_dir):
+                return []
+            entries = os.listdir(self.workspace_dir)
+            subdirs = [
+                e for e in entries
+                if os.path.isdir(os.path.join(self.workspace_dir, e))
+                and not e.startswith(".")
+                and e != "__pycache__"
+                and not e.startswith("$")
+            ]
+            subdirs.sort(key=str.lower)
+            return subdirs[:limit]
+        except Exception as e:
+            logger.debug(f"Failed to list subdirectories: {e}")
+            return []
+
+    def get_parent_workspace(self) -> Optional[str]:
+        """Returns parent directory if valid and different from current."""
+        parent = os.path.dirname(self.workspace_dir)
+        if parent and parent != self.workspace_dir and os.path.isdir(parent):
+            return parent
+        return None
+
+    def get_available_drives(self) -> List[str]:
+        """Returns available drive roots on Windows (e.g. ['C:\\', 'E:\\'])."""
+        if os.name != "nt":
+            return ["/"]
+        try:
+            import ctypes
+            drives = []
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+            for letter in string.ascii_uppercase:
+                if bitmask & 1:
+                    drive_path = f"{letter}:\\"
+                    if os.path.isdir(drive_path):
+                        drives.append(drive_path)
+                bitmask >>= 1
+            return drives
+        except Exception:
+            return ["C:\\"]
 
     def reset_conversation(self):
         """Starts a fresh session by clearing any tied conversation ID."""
