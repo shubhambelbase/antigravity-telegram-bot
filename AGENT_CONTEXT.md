@@ -43,6 +43,7 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `test_injector.py`: Tests process detection, alphanumeric/symbol/space key event records, special keys (Yes/No/Select/Arrows/Ctrl+C), scan codes, and injection safety fallback.
 - `.tmp/` - Temporary files, recent workspaces ledger (`recent_workspaces.json`), and process run logs.
 - `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
+- `run.bat` - Root 1-click Windows launcher with auto-healing installer fallback.
 
 ## Quick-Action Bottom Bar Keyboard
 - Row 1: `[ 📊 Status ]` `[ 📜 Sessions ]` `[ 📸 Screenshot ]`
