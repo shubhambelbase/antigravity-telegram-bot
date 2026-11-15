@@ -94,6 +94,7 @@ class TranscriptWatcher:
         self.on_model_turn = on_model_turn
         self.on_activity_step = on_activity_step
         self._running = False
+        self.is_enabled = True
         self._task: Optional[asyncio.Task] = None
         self._current_conv_id: Optional[str] = None
         self._last_offset = 0
@@ -111,6 +112,21 @@ class TranscriptWatcher:
         if self._task and not self._task.done():
             self._task.cancel()
         logger.info("TranscriptWatcher stopped.")
+
+    def pause(self):
+        """Pauses live PC sync mirroring to Telegram."""
+        self.is_enabled = False
+        logger.info("TranscriptWatcher paused (live sync disabled).")
+
+    def resume(self):
+        """Resumes live PC sync mirroring, fast-forwarding past backlog."""
+        self.is_enabled = True
+        conv_id = self.get_active_conv_id()
+        if conv_id:
+            path = self._get_transcript_path(conv_id)
+            if os.path.isfile(path):
+                self._last_offset = os.path.getsize(path)
+        logger.info("TranscriptWatcher resumed (live sync enabled).")
 
     def _get_transcript_path(self, conv_id: str) -> str:
         return os.path.join(self.brain_dir, conv_id, ".system_generated", "logs", "transcript.jsonl")
@@ -143,6 +159,10 @@ class TranscriptWatcher:
     async def _watch_loop(self):
         while self._running:
             try:
+                if not self.is_enabled:
+                    await asyncio.sleep(1.0)
+                    continue
+
                 conv_id = self.get_active_conv_id()
                 if not conv_id:
                     await asyncio.sleep(1.0)

@@ -512,6 +512,30 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_reply_markup(reply_markup=None)
             return
 
+    # 5. Live Sync Toggle
+    elif data == "sync:toggle":
+        watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
+        if watcher:
+            if watcher.is_enabled:
+                watcher.pause()
+            else:
+                watcher.resume()
+            sync_enabled = watcher.is_enabled
+            status_text = (
+                "🟢 <b>Live Sync: ENABLED</b>\n<i>PC terminal activity, thoughts, and output are mirrored live to Telegram.</i>"
+                if sync_enabled
+                else "⚪ <b>Live Sync: DISABLED (Silent Mode)</b>\n<i>PC activity is paused. The bot will only respond to messages sent directly in this Telegram chat.</i>"
+            )
+            toggle_btn = InlineKeyboardButton(
+                "🔕 Mute Live Sync" if sync_enabled else "🔔 Enable Live Sync",
+                callback_data="sync:toggle"
+            )
+            await query.answer("Live Sync Toggled")
+            await query.edit_message_text(status_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[toggle_btn]]))
+        else:
+            await query.answer("Live sync service not initialized", show_alert=True)
+        return
+
 
 async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
@@ -560,6 +584,49 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles or sets live PC sync mirror on/off."""
+    if not await check_auth(update):
+        return
+
+    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        return
+
+    watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
+    if not watcher:
+        await msg.reply_text("ℹ️ Live sync service is not active.")
+        return
+
+    arg = context.args[0].lower() if context.args else None
+    if arg in ("off", "disable", "stop", "pause", "mute"):
+        watcher.pause()
+    elif arg in ("on", "enable", "start", "resume", "unmute"):
+        watcher.resume()
+    else:
+        # Toggle
+        if watcher.is_enabled:
+            watcher.pause()
+        else:
+            watcher.resume()
+
+    sync_enabled = watcher.is_enabled
+    status_text = (
+        "🟢 <b>Live Sync: ENABLED</b>\n<i>PC terminal activity, thoughts, and outputs are mirrored live to Telegram.</i>"
+        if sync_enabled
+        else "⚪ <b>Live Sync: DISABLED (Silent Mode)</b>\n<i>PC activity is paused. The bot will only respond to messages sent directly in this Telegram chat.</i>"
+    )
+    toggle_btn = InlineKeyboardButton(
+        "🔕 Mute Live Sync" if sync_enabled else "🔔 Enable Live Sync",
+        callback_data="sync:toggle"
+    )
+    await msg.reply_text(
+        status_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[toggle_btn]]),
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
@@ -571,20 +638,29 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     interactive_pid = find_interactive_agy_pid()
     screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless (No active terminal)"
 
+    watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
+    sync_enabled = watcher.is_enabled if watcher else False
+    sync_desc = "🟢 Active (Live Mirror)" if sync_enabled else "⚪ Paused (Silent Mode)"
+
     status_msg = (
         f"📊 <b>System & Remote Control Status</b>\n\n"
         f"<b>CLI Connection:</b> {screen_status}\n"
         f"<b>Agent Status:</b> {agent_state}\n"
+        f"<b>Live PC Sync:</b> {sync_desc}\n"
         f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
         f"<b>Active Session:</b> {conv_text}\n"
         f"<b>Terminal Engine:</b> 🟢 Live Output Streaming + Paced Keystroke Injector\n"
         f"<b>Host CPU:</b> {cpu_pct}%\n"
         f"<b>Host RAM:</b> {mem.percent}% ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)"
     )
+    sync_btn = InlineKeyboardButton(
+        "🔕 Mute Live Sync" if sync_enabled else "🔔 Enable Live Sync",
+        callback_data="sync:toggle"
+    )
     await update.message.reply_text(
         status_msg,
         parse_mode=ParseMode.HTML,
-        reply_markup=QUICK_ACTION_KEYBOARD,
+        reply_markup=InlineKeyboardMarkup([[sync_btn]]),
     )
 
 
@@ -894,6 +970,9 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif prompt_norm in ("logs", "/logs"):
         await cmd_logs(update, context)
         return
+    elif prompt_norm in ("sync", "/sync", "livesync", "/livesync", "mute", "/mute", "unmute", "/unmute"):
+        await cmd_sync(update, context)
+        return
 
     # 2. Shortcut handling for 'attach'
     cleaned_input = user_prompt.lower().replace("...", "").strip()
@@ -1142,6 +1221,10 @@ def main():
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("attach", cmd_attach))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("sync", cmd_sync))
+    app.add_handler(CommandHandler("livesync", cmd_sync))
+    app.add_handler(CommandHandler("mute", cmd_sync))
+    app.add_handler(CommandHandler("unmute", cmd_sync))
     app.add_handler(CommandHandler("controls", cmd_controls))
     app.add_handler(CommandHandler("keys", cmd_controls))
     app.add_handler(CommandHandler("history", cmd_history))

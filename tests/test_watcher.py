@@ -60,10 +60,10 @@ def test_transcript_watcher_detection(tmp_path):
         async def on_user(c_id, text):
             user_turns.append((c_id, text))
 
-        async def on_model(c_id, text, bullets):
-            model_turns.append((c_id, text, bullets))
+        async def on_model(c_id, content, bullets):
+            model_turns.append((c_id, content, bullets))
 
-        async def on_activity(c_id, bullet):
+        async def on_act(c_id, bullet):
             activity_steps.append((c_id, bullet))
 
         watcher = TranscriptWatcher(
@@ -72,11 +72,10 @@ def test_transcript_watcher_detection(tmp_path):
             is_bot_running=lambda: False,
             on_user_turn=on_user,
             on_model_turn=on_model,
-            on_activity_step=on_activity,
+            on_activity_step=on_act,
         )
-
         watcher.start()
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.3)
 
         # 1. Append user prompt
         with open(transcript_file, "a", encoding="utf-8") as f:
@@ -108,5 +107,33 @@ def test_transcript_watcher_detection(tmp_path):
         assert len(model_turns) == 1
         assert model_turns[0][1] == "Bug fixed."
         assert len(model_turns[0][2]) == 2
+
+    asyncio.run(run_test())
+
+
+def test_transcript_watcher_pause_resume(tmp_path):
+    async def run_test():
+        conv_id = "test-conv-pause"
+        logs_dir = tmp_path / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        transcript_file = logs_dir / "transcript.jsonl"
+
+        received = []
+        async def on_act(c_id, bullet):
+            received.append(bullet)
+
+        watcher = TranscriptWatcher(
+            brain_dir=str(tmp_path),
+            get_active_conv_id=lambda: conv_id,
+            is_bot_running=lambda: False,
+            on_user_turn=lambda c, t: None,
+            on_model_turn=lambda c, co, b: None,
+            on_activity_step=on_act,
+        )
+        assert watcher.is_enabled is True
+        watcher.pause()
+        assert watcher.is_enabled is False
+        watcher.resume()
+        assert watcher.is_enabled is True
 
     asyncio.run(run_test())
