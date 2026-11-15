@@ -167,28 +167,30 @@ You can change and manage workspaces directly in Telegram:
 | **`/logs [id]`** | Exports and downloads the complete session execution log. |
 | **`/screenshot`** | Captures live Windows desktop screen. |
 | **`/controls`** | Opens interactive hardware keypad. |
+| **`/sync`** | Toggles live PC terminal mirroring on/off (Silent Mode). |
+| **`/autostart`** | Toggles Windows auto-start on laptop boot. |
 | **`/new`** | Starts a fresh conversation turn in the active workspace. |
 | **`/stop` or `/cancel`** | Kills the currently executing task immediately. |
 
 ---
 
-## Background Daemon (Auto-Start on Boot)
+## Windows Auto-Start on Laptop Boot
 
-To run the bot 24/7 without keeping a command window open:
+The bot can automatically launch in the background whenever you boot or log in to your Windows laptop:
 
-### Method A: Windows Startup Folder (Easiest)
-1. Press `Win + R`, type `shell:startup`, and press Enter.
-2. Right-click inside the folder, select **New > Shortcut**.
-3. Browse to `run_bot.bat` in the project root.
-4. Right-click the shortcut, choose **Properties**, and set **Run: Minimized**.
+### Option 1: 1-Click Batch Script
+- **To Enable:** Double-click `setup\enable_autostart.bat`.
+- **To Disable:** Double-click `setup\disable_autostart.bat`.
 
-### Method B: Windows Task Scheduler
-1. Press `Win + R`, type `taskschd.msc`, and press Enter.
-2. Click **Create Basic Task...**
-3. Name: `Antigravity Telegram Bot`.
-4. Trigger: **When I log on**.
-5. Action: **Start a program** -> Browse to `run_bot.bat`.
-6. Finish.
+### Option 2: Directly from Telegram
+- Send `/autostart` to toggle auto-start on/off.
+- Or tap `[ 🚀 Enable Auto-Start ]` on your `/status` card.
+
+### How It Works Under the Hood
+1. A shortcut is registered in your personal Windows Startup directory (`shell:startup`).
+2. On login, Windows launches `start_bot_silent.vbs` via `wscript.exe`.
+3. The VBScript invokes Python using `.venv\Scripts\pythonw.exe`, running the bot 100% silently in the background with zero terminal windows or taskbar clutter.
+4. Single-instance locking (`.bot.pid`) prevents duplicate processes.
 
 ---
 

@@ -37,6 +37,7 @@ from telegram.ext import (
 )
 
 from execution.agy_runner import AntigravityRunner, ConversationInfo
+from execution.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from execution.console_injector import (
     find_interactive_agy_pid,
     inject_special_key,
@@ -536,6 +537,27 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("Live sync service not initialized", show_alert=True)
         return
 
+    # 6. Auto-Start Toggle
+    elif data == "autostart:toggle":
+        is_on = is_autostart_enabled()
+        if is_on:
+            disable_autostart()
+        else:
+            enable_autostart()
+        new_state = is_autostart_enabled()
+        status_text = (
+            "🚀 <b>Windows Auto-Start: ENABLED</b>\n<i>The Antigravity bot will launch silently in the background whenever you boot or log in to your laptop.</i>"
+            if new_state
+            else "⚪ <b>Windows Auto-Start: DISABLED</b>\n<i>The bot will no longer start automatically when Windows boots.</i>"
+        )
+        toggle_btn = InlineKeyboardButton(
+            "🛑 Disable Auto-Start" if new_state else "🚀 Enable Auto-Start",
+            callback_data="autostart:toggle"
+        )
+        await query.answer("Auto-Start Updated")
+        await query.edit_message_text(status_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[toggle_btn]]))
+        return
+
 
 async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
@@ -627,6 +649,44 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_autostart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Enables, disables, or toggles auto-start on Windows boot."""
+    if not await check_auth(update):
+        return
+
+    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        return
+
+    arg = context.args[0].lower() if context.args else None
+    if arg in ("on", "enable", "start", "yes", "1"):
+        enable_autostart()
+    elif arg in ("off", "disable", "stop", "no", "0"):
+        disable_autostart()
+    else:
+        # Toggle
+        if is_autostart_enabled():
+            disable_autostart()
+        else:
+            enable_autostart()
+
+    new_state = is_autostart_enabled()
+    status_text = (
+        "🚀 <b>Windows Auto-Start: ENABLED</b>\n<i>The Antigravity bot will launch silently in the background whenever you boot or log in to your laptop.</i>"
+        if new_state
+        else "⚪ <b>Windows Auto-Start: DISABLED</b>\n<i>The bot will no longer start automatically when Windows boots.</i>"
+    )
+    toggle_btn = InlineKeyboardButton(
+        "🛑 Disable Auto-Start" if new_state else "🚀 Enable Auto-Start",
+        callback_data="autostart:toggle"
+    )
+    await msg.reply_text(
+        status_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[toggle_btn]]),
+    )
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
@@ -642,11 +702,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sync_enabled = watcher.is_enabled if watcher else False
     sync_desc = "🟢 Active (Live Mirror)" if sync_enabled else "⚪ Paused (Silent Mode)"
 
+    autostart_on = is_autostart_enabled()
+    auto_desc = "🟢 Enabled (Runs on Windows boot)" if autostart_on else "⚪ Disabled"
+
     status_msg = (
         f"📊 <b>System & Remote Control Status</b>\n\n"
         f"<b>CLI Connection:</b> {screen_status}\n"
         f"<b>Agent Status:</b> {agent_state}\n"
         f"<b>Live PC Sync:</b> {sync_desc}\n"
+        f"<b>Auto-Start:</b> {auto_desc}\n"
         f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
         f"<b>Active Session:</b> {conv_text}\n"
         f"<b>Terminal Engine:</b> 🟢 Live Output Streaming + Paced Keystroke Injector\n"
@@ -657,10 +721,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔕 Mute Live Sync" if sync_enabled else "🔔 Enable Live Sync",
         callback_data="sync:toggle"
     )
+    auto_btn = InlineKeyboardButton(
+        "🛑 Disable Auto-Start" if autostart_on else "🚀 Enable Auto-Start",
+        callback_data="autostart:toggle"
+    )
     await update.message.reply_text(
         status_msg,
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[sync_btn]]),
+        reply_markup=InlineKeyboardMarkup([[sync_btn, auto_btn]]),
     )
 
 
@@ -973,6 +1041,9 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif prompt_norm in ("sync", "/sync", "livesync", "/livesync", "mute", "/mute", "unmute", "/unmute"):
         await cmd_sync(update, context)
         return
+    elif prompt_norm in ("autostart", "/autostart", "startup", "/startup", "boot"):
+        await cmd_autostart(update, context)
+        return
 
     # 2. Shortcut handling for 'attach'
     cleaned_input = user_prompt.lower().replace("...", "").strip()
@@ -1227,6 +1298,8 @@ def main():
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("attach", cmd_attach))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("autostart", cmd_autostart))
+    app.add_handler(CommandHandler("startup", cmd_autostart))
     app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("livesync", cmd_sync))
     app.add_handler(CommandHandler("mute", cmd_sync))

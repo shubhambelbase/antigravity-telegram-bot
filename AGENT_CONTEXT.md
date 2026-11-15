@@ -18,13 +18,16 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `screenshot.py`: Desktop screen capture utility (WinSta0 / desktop attachment, PIL ImageGrab, Win32 GDI BitBlt) with blank/transparency validation (`is_blank_or_invalid_image`) and high-fidelity dark-mode terminal window snapshot renderer fallback.
   - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Embeds the Adaptive Progress Dashboard into the persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, consecutive line deduplication (`collapse_consecutive_lines`), compact sliding 8-line windowing (`format_terminal_window`), and separate event notifications for completions/errors.
   - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, extracting tool calls/thoughts, and pausable live sync mirror (`pause()`/`resume()`).
+  - `autostart.py`: Windows Startup folder shortcut manager (`enable_autostart`, `disable_autostart`, `is_autostart_enabled`) creating shortcuts for windowless background execution via `start_bot_silent.vbs`.
   - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), workspace resolution, subdirectory listing, parent tracking, system drive discovery, recent workspaces history, and transcript modification time resolver (`_get_conversation_mtime`) fixing Windows/NTFS folder timestamp inertia.
-  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), live sync control (`/sync`, `/mute`, `sync:toggle`), session reuse in `on_pc_user`, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
+  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), live sync control (`/sync`, `/mute`, `sync:toggle`), auto-start controls (`/autostart`, `autostart:toggle`), session reuse in `on_pc_user`, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
   - `formatter.py`: Converts Markdown output to native Telegram HTML.
 - `setup/` - Automated setup & guides:
-  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements including pytest, runs 40 verification tests with 100% success, copies `.env.example`, pauses at end).
+  - `enable_autostart.bat` / `disable_autostart.bat`: 1-click Windows auto-start toggle scripts.
+  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements including pytest, runs 46 verification tests with 100% success, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.
-- `tests/` - Unit tests (44 passed):
+- `tests/` - Unit tests (46 passed):
+  - `test_autostart.py`: Tests Windows Startup folder resolution, shortcut creation, enable/disable operations.
   - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, and pause/resume live sync toggle.
   - `test_progress_tracker.py`: Tests Mode A (indeterminate), Mode B (activity-based), Mode C (determinate), monotonic non-decreasing progress, 95% cap rule, pytest line integration, and markup stripping in activities.
   - `test_workspace.py`: Tests interactive workspace browser cards, child folder buttons, and system drive selection menus.
@@ -58,6 +61,11 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - `/cd <path>` or `cd <path>`: Switches workspace (supports relative `..`, `subfolder`, or absolute `E:\project`).
 - `/mkdir <path>`: Creates a directory and immediately switches workspace into it.
 
+## Auto-Start Control
+- `/autostart` or `/autostart on` / `/autostart off`: Enables or disables background startup on Windows boot.
+- `[ 🚀 Enable Auto-Start ]` / `[ 🛑 Disable Auto-Start ]`: 1-tap inline toggle in `/status`.
+- Double-click `setup\enable_autostart.bat` or `setup\disable_autostart.bat`.
+
 ## Status & Next Steps
-- Status: Fixed Windows NTFS directory timestamp inertia by prioritizing nested transcript.jsonl mtimes; session reuse prevents duplicate prompt messages. All 44 unit tests passing (100% success). Daemon active and polling.
+- Status: Windows Auto-Start configured and enabled on laptop startup (runs silently in background via start_bot_silent.vbs). All 46 unit tests passing (100% success). Daemon active and polling.
 - Last updated: 2026-11-15.
