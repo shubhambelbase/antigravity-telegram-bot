@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+credntials.txt
+credentials.json
+token.json
+.tmp/
+*.log
+.bot.pid
