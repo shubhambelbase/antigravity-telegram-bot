@@ -19,10 +19,19 @@ A step-by-step guide to installing, configuring, and operating the autonomous **
 
 ---
 
-## Prerequisites
+## Zero-Setup Guarantee for Any Fresh Windows PC
+
+Anyone can download or clone this project onto a brand-new Windows PC with **zero manual configuration**:
+* **No Python pre-installation required:** If Python 3.10+ is missing, the installer automatically downloads and installs the official Python 3.12 runtime.
+* **No system PATH pollution:** Dependencies are installed into an isolated local `.venv` inside the project folder.
+* **Auto-healing launcher:** If a user double-clicks `run_bot.bat` before installing, it automatically runs the installer first.
+
+---
+
+## Prerequisites (Handled Automatically by Installer)
 
 1. **Operating System:** Windows 10 or 11 (64-bit).
-2. **Python:** Version 3.10 or higher. [Download Python](https://www.python.org/downloads/) (Check *"Add python.exe to PATH"* during installation).
+2. **Python:** Version 3.10 or higher *(automatically installed by `install.bat` if missing)*.
 3. **Google Antigravity CLI (`agy`):** Installed and authenticated on your machine.
    - Run `agy --help` in PowerShell or CMD to verify.
 4. **Telegram Account:** Any official Telegram mobile or desktop client.
