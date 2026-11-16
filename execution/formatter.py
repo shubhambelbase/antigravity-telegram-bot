@@ -9,7 +9,7 @@ import re
 from typing import List
 
 # Patterns matching sensitive tokens and secrets
-TELEGRAM_TOKEN_RE = re.compile(r"([0-9]{8,12}:[a-zA-Z0-9_-]{34,38})")
+TELEGRAM_TOKEN_RE = re.compile(r"([0-9]{8,12}:[a-zA-Z0-9_-]{20,50})")
 API_KEY_PATTERNS = [
     re.compile(r"\b(?:sk-[a-zA-Z0-9]{20,})\b"),
     re.compile(r"\b(?:ghp_[a-zA-Z0-9]{20,})\b"),

@@ -8,15 +8,21 @@ Provides a full remote control center for Google Antigravity CLI:
 5. Session History & Logs: /history inspection and /logs export/download.
 """
 
+import os
+import sys
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 import atexit
 import asyncio
 import html
 import io
 import logging
-import os
 import string
-import sys
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional, Set
 
 import psutil
@@ -37,6 +43,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from execution.agy_runner import AntigravityRunner, ConversationInfo
 from execution.autostart import disable_autostart, enable_autostart, is_autostart_enabled
@@ -44,6 +51,7 @@ from execution.console_injector import (
     find_interactive_agy_pid,
     inject_special_key,
     inject_text_to_agy,
+    is_agy_process_busy,
     list_interactive_agy_processes,
 )
 from execution.formatter import markdown_to_telegram_html, sanitize_secrets
@@ -51,17 +59,19 @@ from execution.screenshot import get_screenshot
 from execution.stream_manager import TerminalStreamManager, collapse_consecutive_lines
 from execution.transcript_watcher import TranscriptWatcher
 
+# Environment and path configurations
+DOTENV_PATH = os.path.join(BASE_DIR, ".env")
+PID_FILE = os.path.join(BASE_DIR, ".bot.pid")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+BOT_LOG_FILE = os.path.join(LOGS_DIR, "bot.log")
+
 # Configure logging
 logging.raiseExceptions = False
 
 # Silence noisy network libraries (prevents spamming HTTP 200 OK every second)
 for _noisy_mod in ("httpx", "httpcore", "telegram", "telegram.ext", "apscheduler"):
     logging.getLogger(_noisy_mod).setLevel(logging.WARNING)
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
 
 
 class SecretRedactionFilter(logging.Filter):
@@ -77,17 +87,27 @@ class SecretRedactionFilter(logging.Filter):
         return True
 
 
+log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+redaction_filter = SecretRedactionFilter()
+
 root_logger = logging.getLogger()
-root_logger.addFilter(SecretRedactionFilter())
-for _handler in root_logger.handlers:
-    _handler.addFilter(SecretRedactionFilter())
+root_logger.setLevel(logging.INFO)
+
+# 1. Rotating File Handler (always persists logs to disk safely)
+file_handler = RotatingFileHandler(BOT_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+file_handler.setFormatter(log_formatter)
+file_handler.addFilter(redaction_filter)
+root_logger.addHandler(file_handler)
+
+# 2. Console Stream Handler (only if running interactively with a console, safe under pythonw.exe)
+if sys.stderr is not None and hasattr(sys.stderr, "write"):
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setFormatter(log_formatter)
+    stream_handler.addFilter(redaction_filter)
+    root_logger.addHandler(stream_handler)
 
 logger = logging.getLogger(__name__)
 
-# Load environment
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOTENV_PATH = os.path.join(BASE_DIR, ".env")
-PID_FILE = os.path.join(BASE_DIR, ".bot.pid")
 load_dotenv(DOTENV_PATH)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -447,6 +467,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         conv_id = data.split("attach:", 1)[1]
         if runner.set_conversation(conv_id):
             await query.edit_message_reply_markup(reply_markup=None)
+            watcher = context.application.bot_data.get("watcher")
+            if watcher:
+                await watcher.switch_to_conv(runner.conversation_id)
             target_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
             target_info = (
                 f"🖥️ <b>Desktop Terminal:</b> Live PID {target_pid}\n"
@@ -644,6 +667,9 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chosen_id = target
 
     if runner.set_conversation(chosen_id):
+        watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
+        if watcher and runner.conversation_id:
+            await watcher.switch_to_conv(runner.conversation_id)
         await update.message.reply_text(
             f"🔗 <b>Attached to Conversation Session:</b>\n"
             f"<code>{html.escape(runner.conversation_id)}</code>\n\n"
@@ -1062,6 +1088,24 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def _verify_injection_progress(
+    session,
+    pid: int,
+    user_prompt: str,
+    timeout_seconds: float = 15.0,
+):
+    """Monitors whether real tool/transcript output starts within timeout_seconds after injection."""
+    await asyncio.sleep(timeout_seconds)
+    if session and session.is_active and not session.has_real_output:
+        logger.warning(f"Desktop terminal PID {pid} produced no output 15s after prompt injection.")
+        session.set_header_info(
+            f"<b>Injected to Desktop Terminal (PID {pid}):</b>\n"
+            f"&gt; <i>{html.escape(user_prompt)}</i>\n\n"
+            f"⚠️ <i>No execution logs detected after 15s. The desktop terminal may be waiting for confirmation or input.</i>\n"
+            f"💡 <i>Tap <b>/controls</b> or send <b>/screenshot</b> to view current terminal state.</i>"
+        )
+
+
 async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
@@ -1144,6 +1188,16 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Check if an interactive terminal window is open on desktop for the target session or workspace
     interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     if interactive_pid and stream_manager:
+        # If no explicit session is attached yet, auto-bind to this interactive process's session
+        if not runner.conversation_id:
+            from execution.console_injector import get_agy_process_conv_id
+            try:
+                proc_conv = get_agy_process_conv_id(psutil.Process(interactive_pid))
+                if proc_conv:
+                    runner.set_conversation(proc_conv)
+            except Exception:
+                pass
+
         session_title = f"Antigravity Live PC Screen (PID {interactive_pid})"
         session = await stream_manager.start_session(
             chat_id=chat_id,
@@ -1151,11 +1205,33 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             initial_status="Injecting Prompt...",
             initial_prompt=user_prompt,
         )
+
+        busy_note = ""
+        if is_agy_process_busy(interactive_pid):
+            busy_note = "\n<i>Note: Terminal is busy with active subtasks; prompt queued into input buffer.</i>"
+
         injected = inject_text_to_agy(user_prompt, pid=interactive_pid)
         if injected:
             session.set_header_info(
                 f"<b>Injected to Desktop Terminal (PID {interactive_pid}):</b>\n"
-                f"&gt; <i>{html.escape(user_prompt)}</i>"
+                f"&gt; <i>{html.escape(user_prompt)}</i>{busy_note}"
+            )
+
+            # Ensure watcher is actively tracking this session and live sync is unmuted for user-initiated prompt
+            watcher = context.application.bot_data.get("watcher")
+            if watcher:
+                watcher.is_enabled = True
+                if runner.conversation_id:
+                    await watcher.switch_to_conv(runner.conversation_id)
+
+            # Verification watchdog: if no real output arrives within 15 seconds, notify and offer controls
+            asyncio.create_task(
+                _verify_injection_progress(
+                    session=session,
+                    pid=interactive_pid,
+                    user_prompt=user_prompt,
+                    timeout_seconds=15.0,
+                )
             )
             return
         else:
@@ -1217,12 +1293,15 @@ def check_single_instance() -> bool:
         try:
             with open(PID_FILE, "r") as f:
                 old_pid = int(f.read().strip())
-            if psutil.pid_exists(old_pid):
-                proc = psutil.Process(old_pid)
-                cmdline = proc.cmdline() or []
-                if "python" in proc.name().lower() and any("telegram_bot" in arg.lower() for arg in cmdline):
-                    logger.warning(f"Another instance is already running with PID {old_pid}. Exiting.")
-                    return False
+            if old_pid != os.getpid() and psutil.pid_exists(old_pid):
+                try:
+                    proc = psutil.Process(old_pid)
+                    cmdline = proc.cmdline() or []
+                    if "python" in proc.name().lower() and any("telegram_bot" in arg.lower() for arg in cmdline):
+                        logger.warning(f"Another instance is already running with PID {old_pid}. Exiting.")
+                        return False
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
         except Exception:
             pass
 
@@ -1233,7 +1312,10 @@ def check_single_instance() -> bool:
     def cleanup():
         try:
             if os.path.exists(PID_FILE):
-                os.remove(PID_FILE)
+                with open(PID_FILE, "r") as f:
+                    content = f.read().strip()
+                if content == str(os.getpid()):
+                    os.remove(PID_FILE)
         except Exception:
             pass
 
@@ -1244,6 +1326,16 @@ def check_single_instance() -> bool:
 async def post_init(application: Application):
     """Initializes and starts the hybrid streaming engine and transcript mirror watcher."""
     global stream_manager
+    loop = asyncio.get_running_loop()
+
+    def _suppress_proactor_winerror(l: asyncio.AbstractEventLoop, ctx: dict):
+        exc = ctx.get("exception")
+        if isinstance(exc, ConnectionResetError) and getattr(exc, "winerror", None) == 10054:
+            return
+        l.default_exception_handler(ctx)
+
+    loop.set_exception_handler(_suppress_proactor_winerror)
+
     stream_manager = TerminalStreamManager(bot=application.bot)
     application.bot_data["stream_manager"] = stream_manager
 
@@ -1345,21 +1437,19 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
     logger.error("Unhandled exception occurred:", exc_info=context.error)
 
 
-def main():
-    if not check_single_instance():
-        print("\n====================================================")
-        print("  [!] Antigravity Telegram Bot is already running.")
-        print("====================================================")
-        sys.exit(2)
-
-    if not BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN is missing in .env")
-        return
-
-    logger.info("Starting Antigravity Remote Control with Interactive Controls & Session History...")
+def run_bot():
+    logger.info("Initializing Antigravity Remote Control with Interactive Controls & Session History...")
+    request_config = HTTPXRequest(
+        connection_pool_size=16,
+        read_timeout=35.0,
+        write_timeout=35.0,
+        connect_timeout=20.0,
+        pool_timeout=20.0,
+    )
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .request(request_config)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -1395,7 +1485,47 @@ def main():
     app.add_error_handler(global_error_handler)
 
     logger.info("Antigravity Remote Control is polling with interactive terminal controls...")
-    app.run_polling()
+    app.run_polling(
+        poll_interval=0.5,
+        timeout=20,
+        bootstrap_retries=-1,
+        drop_pending_updates=False,
+    )
+
+
+def main():
+    if not check_single_instance():
+        print("\n====================================================")
+        print("  [!] Antigravity Telegram Bot is already running.")
+        print("====================================================")
+        sys.exit(2)
+
+    if not BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN is missing in .env")
+        return
+
+    consecutive_failures = 0
+    while True:
+        cycle_start = time.time()
+        try:
+            run_bot()
+            logger.info("Antigravity Bot exited normally.")
+            break
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Antigravity Bot terminated by user or system signal.")
+            break
+        except Exception as e:
+            uptime = time.time() - cycle_start
+            if uptime > 60:
+                consecutive_failures = 0
+            consecutive_failures += 1
+            delay = min(60, 2 ** min(consecutive_failures, 5))
+            logger.error(
+                f"Antigravity Bot crashed unexpectedly: {e}. "
+                f"Auto-restart attempt #{consecutive_failures} in {delay} seconds...",
+                exc_info=True,
+            )
+            time.sleep(delay)
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `enable_autostart.bat` / `disable_autostart.bat`: 1-click Windows auto-start toggle scripts.
   - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs 47 verification tests, copies `.env.example`, pauses at end).
   - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.
-- `tests/` - Unit tests (55 passed):
+- `tests/` - Unit tests (59 passed):
   - `test_autostart.py`: Tests Windows Startup folder resolution, shortcut creation, enable/disable operations.
   - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, partial line race condition guards with byte offset rewind, and pause/resume live sync toggle.
   - `test_progress_tracker.py`: Tests Mode A (indeterminate skeleton loader bar & activity shimmer), Mode B (activity-based), Mode C (determinate), monotonic non-decreasing progress, 95% cap rule, pytest line integration, and markup stripping in activities.
@@ -41,6 +41,7 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
   - `test_runner.py`: Tests runner initialization, relative/absolute workspace switching, folder creation, subdirectory inspection, parent directory retrieval, path traversal prevention, log secret redaction, and session logs export.
   - `test_formatter.py`: Tests Markdown-to-HTML conversion, Telegram bot token redaction, and API key sanitization.
   - `test_injector.py`: Tests process detection, session memory map matching (`conversations/<conv_id>.db*`), workspace matching, target PID resolution, alphanumeric/symbol/space key event records, special keys (Yes/No/Select/Arrows/Ctrl+C), scan codes, and injection safety fallback.
+  - `test_supervisor.py`: Tests secret redaction filter in logs/args, single instance PID cleanup, and supervisor retry loop with exponential backoff on network drops.
 - `.tmp/` - Temporary files, recent workspaces ledger (`recent_workspaces.json`), and process run logs.
 - `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
 - `run.bat` - Root 1-click Windows launcher with auto-healing installer fallback.
@@ -78,5 +79,5 @@ A lightweight, reliable, autonomous Telegram remote control center for Google An
 - Memory & Buffer Protection: Output stream and buffer caps prevent host memory exhaustion on runaway or infinite loop processes.
 
 ## Status & Next Steps
-- Status: Fixed multi-session prompt cross-injection by implementing exact session memory-map (`conversations/<conv_id>.db*`) and workspace targeting. Implemented continuous shimmering skeleton loader animation active across indeterminate/loading states until live tool execution arrives. All 55 unit tests passing (100% success). Daemon active and polling.
-- Last updated: 2026-11-15.
+- Status: Production reliability overhaul completed. Implemented supervisor daemon with auto-recovery exponential backoff, HTTPX connection pooling with extended timeouts, Proactor WinError 10054 suppression, rotating file logger (`logs/bot.log`), Win32 `AllowSetForegroundWindow` activation with dynamic pacing, injection watchdog, and session open turn rewind. 59/59 unit tests passing (100% success). Daemon active and polling.
+- Last updated: 2026-11-16.

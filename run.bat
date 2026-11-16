@@ -33,7 +33,7 @@ if not exist ".env" (
 REM Check if bot is already running
 if exist ".bot.pid" (
     set /p EXISTING_PID=<.bot.pid
-    powershell -Command "if (Get-Process -Id '!EXISTING_PID!' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" >nul 2>&1
+    powershell -Command "try { $p = Get-Process -Id '!EXISTING_PID!' -ErrorAction Stop; if ($p.ProcessName -like '*python*') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
     if !errorlevel! equ 0 (
         echo ====================================================
         echo [!] Bot is ALREADY RUNNING in background (PID: !EXISTING_PID!).

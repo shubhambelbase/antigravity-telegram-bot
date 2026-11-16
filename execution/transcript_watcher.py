@@ -131,6 +131,11 @@ class TranscriptWatcher:
     def _get_transcript_path(self, conv_id: str) -> str:
         return os.path.join(self.brain_dir, conv_id, ".system_generated", "logs", "transcript.jsonl")
 
+    async def switch_to_conv(self, conv_id: str):
+        """Forces immediate re-initialization of tracking for the target conversation ID."""
+        if conv_id and conv_id != self._current_conv_id:
+            await self._init_tracking_for_conv(conv_id)
+
     async def _init_tracking_for_conv(self, conv_id: str):
         self._current_conv_id = conv_id
         path = self._get_transcript_path(conv_id)
@@ -140,19 +145,49 @@ class TranscriptWatcher:
 
         if os.path.isfile(path):
             try:
-                # Seek to end of file so we only stream NEW events going forward
+                last_user_offset = 0
+                last_user_step = -1
+                has_completed_model = False
+                highest_step = -1
+
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        if line.strip():
-                            try:
-                                data = json.loads(line)
-                                step = data.get("step_index", -1)
-                                if step > self._last_step_index:
-                                    self._last_step_index = step
-                            except Exception:
-                                pass
-                    self._last_offset = f.tell()
-                logger.info(f"Initialized watcher on session {conv_id} at step {self._last_step_index}")
+                    while True:
+                        line_offset = f.tell()
+                        line = f.readline()
+                        if not line:
+                            break
+                        if not line.strip():
+                            continue
+                        try:
+                            d = json.loads(line)
+                            step = d.get("step_index", -1)
+                            if step > highest_step:
+                                highest_step = step
+                            src = d.get("source")
+                            rec_type = d.get("type")
+                            content = d.get("content")
+                            if src == "USER_EXPLICIT" and rec_type == "USER_INPUT":
+                                last_user_offset = line_offset
+                                last_user_step = step
+                                has_completed_model = False
+                            elif src == "MODEL" and rec_type == "PLANNER_RESPONSE":
+                                if content and content.strip():
+                                    has_completed_model = True
+                        except Exception:
+                            pass
+
+                    # If the latest turn is active (i.e. model hasn't finalized response),
+                    # rewind to the start of that turn so we can stream its live progress!
+                    if last_user_step != -1 and not has_completed_model:
+                        self._last_offset = last_user_offset
+                        self._last_step_index = last_user_step - 1
+                        logger.info(
+                            f"Initialized watcher on active turn in session {conv_id} (rewound to step {last_user_step})"
+                        )
+                    else:
+                        self._last_offset = f.tell()
+                        self._last_step_index = highest_step
+                        logger.info(f"Initialized watcher on idle session {conv_id} at step {self._last_step_index}")
             except Exception as e:
                 logger.warning(f"Error initializing transcript tracking: {e}")
 

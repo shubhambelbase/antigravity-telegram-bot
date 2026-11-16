@@ -77,6 +77,9 @@ user32.MapVirtualKeyW.restype = wintypes.UINT
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 user32.SetForegroundWindow.restype = wintypes.BOOL
 
+user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+
 
 class KEY_EVENT_RECORD(ctypes.Structure):
     _fields_ = [
@@ -391,6 +394,7 @@ def inject_text_to_agy(
             hwnd = kernel32.GetConsoleWindow()
             if hwnd:
                 try:
+                    user32.AllowSetForegroundWindow(target_pid)
                     user32.SetForegroundWindow(hwnd)
                 except Exception:
                     pass
@@ -418,8 +422,9 @@ def inject_text_to_agy(
                     time.sleep(0.003)
 
                 if total_chars_written > 0:
-                    # Allow Bubbletea textinput component to finish redrawing before Enter
-                    time.sleep(0.06)
+                    # Dynamically pace pre-Enter delay so Bubbletea finished drawing textarea
+                    pre_enter_delay = max(0.12, len(clean_text) * 0.001)
+                    time.sleep(pre_enter_delay)
 
                     # Send Enter KeyDown with hardware scan code 0x1C (VK_RETURN)
                     ret_down = INPUT_RECORD()
@@ -435,7 +440,7 @@ def inject_text_to_agy(
                     arr_ret_down = single_type(ret_down)
                     kernel32.WriteConsoleInputW(h_conin, arr_ret_down, 1, ctypes.byref(written_count))
 
-                    time.sleep(0.02)
+                    time.sleep(0.04)
 
                     # Send Enter KeyUp
                     ret_up = INPUT_RECORD()
@@ -449,7 +454,7 @@ def inject_text_to_agy(
 
                     arr_ret_up = single_type(ret_up)
                     kernel32.WriteConsoleInputW(h_conin, arr_ret_up, 1, ctypes.byref(written_count))
-                    time.sleep(0.02)
+                    time.sleep(0.04)
                     success = True
                 else:
                     err_message = "Zero characters were written to CONIN$."
@@ -594,4 +599,22 @@ def inject_special_key(
         if err_message:
             logger.warning(err_message)
         return False
+
+
+def is_agy_process_busy(pid: Optional[int] = None) -> bool:
+    """Checks if an agy process or its child processes are actively executing tools (compilers, git, python, etc.)."""
+    target_pid = pid or find_interactive_agy_pid()
+    if not target_pid:
+        return False
+    try:
+        proc = psutil.Process(target_pid)
+        for child in proc.children(recursive=True):
+            if not child.is_running():
+                continue
+            cname = child.name().lower()
+            if any(tool in cname for tool in ("python", "git", "cargo", "npm", "node", "pytest", "bash", "powershell", "cmd", "gradle", "mvn")):
+                return True
+    except Exception:
+        pass
+    return False
 
