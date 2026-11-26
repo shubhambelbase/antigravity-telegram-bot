@@ -15,6 +15,14 @@
 
 ---
 
+## 📸 How It Works
+
+<p align="center">
+  <img src="docs/screenshots/controller-workflow.png" alt="Antigravity Telegram Controller Workflow" width="100%"/>
+</p>
+
+---
+
 ## 🌟 Highlights
 
 - 📺 **Direct PC Screen Keystroke Injection**: When your Antigravity terminal is open on your desktop, prompts sent from Telegram physically type out on your monitor and run right before your eyes!
