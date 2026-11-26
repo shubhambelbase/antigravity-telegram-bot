@@ -70,21 +70,28 @@
 3. Copy the HTTP API Token provided.
 
 ### 3. Install
-Clone the repository and run the automated installer:
-```cmd
+Clone the repository, create a virtual environment, and install dependencies in **PowerShell**:
+```powershell
 git clone https://github.com/shubhambelbase/antigravity-telegram-bot.git
 cd antigravity-telegram-bot
-setup\install.bat
+
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
-*(The installer sets up your `.venv`, installs requirements, runs 47 unit tests, and creates your `.env` configuration file).*
 
 ### 4. Configure & Launch
 1. Open `.env` and paste your bot token:
    ```env
    TELEGRAM_BOT_TOKEN=your_token_here
    ```
-2. Double-click **`setup\run_bot.bat`** (or run `antigravity-bot` from your terminal).
-3. In Telegram, open your bot, send **`/start`**, and click the pairing command (e.g. `/claim <YOUR_ID>`).
+2. Start the bot from PowerShell:
+   ```powershell
+   .\.venv\Scripts\python.exe -m execution.telegram_bot
+   ```
+   *(Or run silently in the background via `wscript.exe .\setup\start_bot_silent.vbs`).*
+3. In Telegram, open your bot, send **`/start`**, check your local console / `logs/bot.log` / `.tmp/pairing_code.txt` for the 6-digit pairing PIN, and send `/claim <PIN>`.
 4. You are ready! Send any coding prompt or command.
 
 For full setup documentation, see [setup/setup_guide.md](setup/setup_guide.md).
@@ -123,23 +130,15 @@ For full setup documentation, see [setup/setup_guide.md](setup/setup_guide.md).
 ## 🧪 Testing
 
 Run the full automated test suite anytime:
-```cmd
-python -m pytest tests/
-```
-Output:
-```text
-============================= 47 passed in 6.61s =============================
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/ -v
 ```
 
 ---
 
-## 🚀 Publishing to GitHub
+## ⚙️ Silent Windows Auto-Start
 
-To push this codebase to your GitHub repository:
-```cmd
-setup\push_to_github.bat
-```
-*(Automatically verifies secrets are safe, runs unit tests, creates the GitHub repo if needed, and pushes branch `main`).*
+Send **`/autostart`** inside Telegram (or run `.\.venv\Scripts\python.exe -c "from execution.autostart import enable_autostart; enable_autostart()"` in PowerShell) to launch silently on boot via `pythonw.exe`.
 
 ---
 

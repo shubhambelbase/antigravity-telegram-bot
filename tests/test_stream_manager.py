@@ -286,3 +286,72 @@ def test_stream_session_skeleton_animation():
         await session.complete(final_status="Done")
 
     asyncio.run(_run())
+
+
+def test_stream_view_respects_telegram_length_limit():
+    mock_bot = MagicMock()
+    session = HybridStreamSession(bot=mock_bot, chat_id=1, title="Long Output")
+    session.set_header_info("<b>Injected:</b>\n" + ("&<>prompt " * 300))
+    session.feed(("<tag>&\"' " * 300 + "\n") * 8)
+
+    rendered = session._render_current_view(status="Working")
+    assert len(rendered) <= 3900
+    assert "</code></pre>" in rendered
+
+
+def test_stream_completion_retries_transient_timeout_and_unescapes_plain():
+    async def _run():
+        mock_bot = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.message_id = 3131
+
+        calls = 0
+
+        async def send_side_effect(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise TimeoutError("Timed out")
+            if calls == 3:
+                raise Exception("Can't parse entities: bad tag")
+            return mock_msg
+
+        mock_bot.send_message = AsyncMock(side_effect=send_side_effect)
+        mock_bot.edit_message_text = AsyncMock(return_value=True)
+
+        session = HybridStreamSession(bot=mock_bot, chat_id=77, edit_interval=0.05, buffer_debounce=0.01)
+        await session.start()
+        await session.complete(
+            final_status="Completed",
+            event_notification="<b>Result:</b> <code>Vector&lt;int&gt;</code> &amp; done <broken",
+        )
+        assert calls == 4
+        plain_sent = mock_bot.send_message.call_args_list[-1].kwargs["text"]
+        assert "Vector<int> & done" in plain_sent
+
+    asyncio.run(_run())
+
+
+def test_stream_skeleton_timeout_pauses_edits():
+    async def _run():
+        mock_bot = MagicMock()
+        mock_msg = MagicMock()
+        mock_msg.message_id = 4141
+        mock_bot.send_message = AsyncMock(return_value=mock_msg)
+        mock_bot.edit_message_text = AsyncMock(return_value=True)
+
+        session = HybridStreamSession(
+            bot=mock_bot,
+            chat_id=88,
+            edit_interval=0.05,
+            buffer_debounce=0.01,
+            skeleton_timeout=0.15,
+        )
+        await session.start()
+        await asyncio.sleep(0.35)
+        count_after_timeout = mock_bot.edit_message_text.call_count
+        await asyncio.sleep(0.25)
+        assert mock_bot.edit_message_text.call_count == count_after_timeout
+        await session.complete(final_status="Done")
+
+    asyncio.run(_run())

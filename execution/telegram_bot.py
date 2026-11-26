@@ -4,7 +4,7 @@ Provides a full remote control center for Google Antigravity CLI:
 1. CLI Connection: Live status monitoring (Desktop Terminal vs Headless).
 2. Terminal Controls: Normal command input, instant keystroke injection.
 3. Interactive Prompts: Inline keypad for Yes / No / Select (1, 2, 3), Arrows, and Ctrl+C.
-4. Live Output: Hybrid streaming terminal view with 1s updates.
+4. Live Output: Hybrid streaming terminal view with ~1s updates and 4,096-char guards.
 5. Session History & Logs: /history inspection and /logs export/download.
 """
 
@@ -17,13 +17,17 @@ if BASE_DIR not in sys.path:
 
 import atexit
 import asyncio
+import ctypes
+import hashlib
 import html
 import io
+import json
 import logging
+import secrets
 import string
 import time
 from logging.handlers import RotatingFileHandler
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import psutil
 from dotenv import load_dotenv
@@ -35,6 +39,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -45,10 +50,12 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-from execution.agy_runner import AntigravityRunner, ConversationInfo
+from execution.agy_runner import AntigravityRunner
 from execution.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from execution.console_injector import (
     find_interactive_agy_pid,
+    get_agy_process_conv_id,
+    get_workspace_for_conversation,
     inject_special_key,
     inject_text_to_agy,
     is_agy_process_busy,
@@ -56,57 +63,81 @@ from execution.console_injector import (
 )
 from execution.formatter import markdown_to_telegram_html, sanitize_secrets
 from execution.screenshot import get_screenshot
-from execution.stream_manager import TerminalStreamManager, collapse_consecutive_lines
+from execution.stream_manager import (
+    SAFE_TELEGRAM_LIMIT,
+    TerminalStreamManager,
+    call_with_retry,
+    collapse_consecutive_lines,
+    html_to_plain_text,
+)
 from execution.transcript_watcher import TranscriptWatcher
 
 # Environment and path configurations
 DOTENV_PATH = os.path.join(BASE_DIR, ".env")
-PID_FILE = os.path.join(BASE_DIR, ".bot.pid")
+DEFAULT_PID_FILE = os.path.join(BASE_DIR, ".bot.pid")
+PID_FILE = DEFAULT_PID_FILE
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
-os.makedirs(LOGS_DIR, exist_ok=True)
 BOT_LOG_FILE = os.path.join(LOGS_DIR, "bot.log")
+BOT_STATE_FILE = os.path.join(BASE_DIR, ".tmp", "bot_state.json")
+PAIRING_CODE_FILE = os.path.join(BASE_DIR, ".tmp", "pairing_code.txt")
 
-# Configure logging
-logging.raiseExceptions = False
-
-# Silence noisy network libraries (prevents spamming HTTP 200 OK every second)
-for _noisy_mod in ("httpx", "httpcore", "telegram", "telegram.ext", "apscheduler"):
-    logging.getLogger(_noisy_mod).setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
+_logging_configured = False
+_single_instance_mutex_handle: Optional[int] = None
+_active_pairing_pin: Optional[str] = None
+_desired_sync_enabled: bool = True
 
 
 class SecretRedactionFilter(logging.Filter):
     """Filters out any Telegram bot token or API keys from logging outputs."""
+
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
             record.msg = sanitize_secrets(record.msg)
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: sanitize_secrets(str(v)) if isinstance(v, str) else v for k, v in record.args.items()}
+                record.args = {
+                    k: sanitize_secrets(str(v)) if isinstance(v, str) else v
+                    for k, v in record.args.items()
+                }
             elif isinstance(record.args, tuple):
-                record.args = tuple(sanitize_secrets(str(a)) if isinstance(a, str) else a for a in record.args)
+                record.args = tuple(
+                    sanitize_secrets(str(a)) if isinstance(a, str) else a
+                    for a in record.args
+                )
         return True
 
 
-log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-redaction_filter = SecretRedactionFilter()
+def configure_logging() -> None:
+    """Initializes rotating file and console logging cleanly (deferred from import time for test isolation)."""
+    global _logging_configured
+    if _logging_configured:
+        return
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    logging.raiseExceptions = False
 
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
+    for _noisy_mod in ("httpx", "httpcore", "telegram", "telegram.ext", "apscheduler"):
+        logging.getLogger(_noisy_mod).setLevel(logging.WARNING)
 
-# 1. Rotating File Handler (always persists logs to disk safely)
-file_handler = RotatingFileHandler(BOT_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
-file_handler.setFormatter(log_formatter)
-file_handler.addFilter(redaction_filter)
-root_logger.addHandler(file_handler)
+    log_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    redaction_filter = SecretRedactionFilter()
 
-# 2. Console Stream Handler (only if running interactively with a console, safe under pythonw.exe)
-if sys.stderr is not None and hasattr(sys.stderr, "write"):
-    stream_handler = logging.StreamHandler(sys.stderr)
-    stream_handler.setFormatter(log_formatter)
-    stream_handler.addFilter(redaction_filter)
-    root_logger.addHandler(stream_handler)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
 
-logger = logging.getLogger(__name__)
+    file_handler = RotatingFileHandler(BOT_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    file_handler.setFormatter(log_formatter)
+    file_handler.addFilter(redaction_filter)
+    root_logger.addHandler(file_handler)
+
+    if sys.stderr is not None and hasattr(sys.stderr, "write"):
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(log_formatter)
+        stream_handler.addFilter(redaction_filter)
+        root_logger.addHandler(stream_handler)
+
+    _logging_configured = True
+
 
 load_dotenv(DOTENV_PATH)
 
@@ -169,6 +200,98 @@ runner = AntigravityRunner(agy_path=AGY_PATH, default_workspace=DEFAULT_WORKSPAC
 stream_manager: Optional[TerminalStreamManager] = None
 
 
+def _short_token(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+def _paths_match(p1: str, p2: str) -> bool:
+    if not p1 or not p2:
+        return False
+    try:
+        return os.path.samefile(p1, p2)
+    except Exception:
+        return os.path.normcase(os.path.abspath(p1)) == os.path.normcase(os.path.abspath(p2))
+
+
+def _preview_prompt(prompt: str, max_len: int = 220) -> str:
+    clean = " ".join(prompt.split())
+    if len(clean) <= max_len:
+        return clean
+    return clean[: max_len - 3] + "..."
+
+
+def save_bot_state(sync_enabled: Optional[bool] = None) -> None:
+    """Persists active workspace, conversation ID, and live sync toggle across restarts."""
+    global _desired_sync_enabled
+    if sync_enabled is not None:
+        _desired_sync_enabled = bool(sync_enabled)
+    state = {
+        "workspace_dir": runner.workspace_dir,
+        "conversation_id": runner.conversation_id,
+        "sync_enabled": _desired_sync_enabled,
+    }
+    try:
+        os.makedirs(os.path.dirname(BOT_STATE_FILE), exist_ok=True)
+        tmp_path = f"{BOT_STATE_FILE}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, BOT_STATE_FILE)
+    except Exception as e:
+        logger.debug(f"Failed to persist bot state: {e}")
+
+
+def restore_bot_state() -> None:
+    """Restores previously persisted workspace, conversation ID, and sync state."""
+    global _desired_sync_enabled
+    if not os.path.isfile(BOT_STATE_FILE):
+        return
+    try:
+        with open(BOT_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            return
+        conv_id = state.get("conversation_id")
+        ws = state.get("workspace_dir")
+        if conv_id and isinstance(conv_id, str):
+            runner.set_conversation(conv_id)
+        if ws and isinstance(ws, str) and os.path.isdir(ws):
+            # Preserve restored workspace without clearing conversation_id if already bound to same workspace
+            runner.workspace_dir = os.path.abspath(ws)
+            runner._record_workspace(runner.workspace_dir)
+        if isinstance(state.get("sync_enabled"), bool):
+            _desired_sync_enabled = state["sync_enabled"]
+    except Exception as e:
+        logger.debug(f"Failed to restore bot state: {e}")
+
+
+def get_or_create_pairing_pin() -> str:
+    """Returns configured PAIRING_PIN or generates a local 6-digit pairing PIN for unclaimed setup."""
+    global _active_pairing_pin
+    env_pin = os.getenv("PAIRING_PIN", "").strip()
+    if env_pin:
+        return env_pin
+    if _active_pairing_pin:
+        return _active_pairing_pin
+    _active_pairing_pin = f"{secrets.randbelow(900000) + 100000}"
+    try:
+        os.makedirs(os.path.dirname(PAIRING_CODE_FILE), exist_ok=True)
+        with open(PAIRING_CODE_FILE, "w", encoding="utf-8") as f:
+            f.write(_active_pairing_pin + "\n")
+    except Exception as e:
+        logger.debug(f"Could not write pairing code file: {e}")
+    return _active_pairing_pin
+
+
+def clear_pairing_pin() -> None:
+    global _active_pairing_pin
+    _active_pairing_pin = None
+    try:
+        if os.path.isfile(PAIRING_CODE_FILE):
+            os.remove(PAIRING_CODE_FILE)
+    except Exception:
+        pass
+
+
 def save_claimed_user(user_id: int):
     global ALLOWED_USER_IDS
     ALLOWED_USER_IDS.add(user_id)
@@ -189,8 +312,11 @@ def save_claimed_user(user_id: int):
     if not found:
         new_lines.append(f"ALLOWED_TELEGRAM_USER_IDS={user_id}\n")
 
-    with open(DOTENV_PATH, "w", encoding="utf-8") as f:
+    tmp_env = f"{DOTENV_PATH}.tmp"
+    with open(tmp_env, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
+    os.replace(tmp_env, DOTENV_PATH)
+    clear_pairing_pin()
     logger.info(f"Saved ALLOWED_TELEGRAM_USER_IDS={user_id} to {DOTENV_PATH}")
 
 
@@ -202,22 +328,26 @@ def is_authorized(user_id: int) -> bool:
 
 async def check_auth(update: Update) -> bool:
     user = update.effective_user
+    msg = update.effective_message
     if not user:
         return False
 
     if not ALLOWED_USER_IDS:
-        await update.message.reply_text(
-            f"🔒 <b>Antigravity Controller (Setup Mode)</b>\n\n"
-            f"Your Telegram User ID is: <code>{user.id}</code>\n\n"
-            f"This bot is currently unclaimed. To pair and lock it to your account, send:\n"
-            f"<code>/claim {user.id}</code>",
-            parse_mode=ParseMode.HTML,
-        )
+        get_or_create_pairing_pin()
+        if msg:
+            await msg.reply_text(
+                f"🔒 <b>Antigravity Controller (Setup Mode)</b>\n\n"
+                f"Your Telegram User ID is: <code>{user.id}</code>\n\n"
+                f"This bot is unclaimed. Check your local PC console, <code>logs/bot.log</code>, "
+                f"or <code>.tmp/pairing_code.txt</code> for the 6-digit pairing PIN, then send:\n"
+                f"<code>/claim &lt;PIN&gt;</code>",
+                parse_mode=ParseMode.HTML,
+            )
         return False
 
     if user.id not in ALLOWED_USER_IDS:
-        if update.message:
-            await update.message.reply_text(
+        if msg:
+            await msg.reply_text(
                 f"⛔ <b>Access Denied</b>\n"
                 f"Your Telegram User ID (<code>{user.id}</code>) is not authorized to control this machine.",
                 parse_mode=ParseMode.HTML,
@@ -238,7 +368,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await check_auth(update)
         return
 
-    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
+    interactive_pid = await asyncio.to_thread(
+        find_interactive_agy_pid,
+        conv_id=runner.conversation_id,
+        workspace=runner.workspace_dir,
+    )
     screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless Runner"
     conv_text = f"<code>{runner.conversation_id[:8]}...</code>" if runner.conversation_id else "Auto-Tracking"
 
@@ -257,7 +391,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• 📁 <b>/pwd</b> &amp; <b>/cd &lt;path&gt;</b> - Workspace navigation\n"
         f"• 🛑 <b>/stop</b> - Kill active task immediately"
     )
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         welcome_text,
         parse_mode=ParseMode.HTML,
         reply_markup=QUICK_ACTION_KEYBOARD,
@@ -266,27 +400,39 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user:
+    msg = update.effective_message
+    if not user or not msg:
         return
 
     if ALLOWED_USER_IDS:
-        await update.message.reply_text(
+        await msg.reply_text(
             "🔒 Bot is already claimed and locked down.",
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
         return
 
-    args = context.args
-    if not args or args[0] != str(user.id):
-        await update.message.reply_text(
-            f"To claim, send: <code>/claim {user.id}</code>",
+    expected_pin = get_or_create_pairing_pin()
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+
+    provided_pin = ""
+    if len(args) == 1:
+        provided_pin = args[0]
+    elif len(args) >= 2 and args[0] == str(user.id):
+        provided_pin = args[1]
+
+    if not provided_pin or not secrets.compare_digest(provided_pin, expected_pin):
+        logger.warning(f"Failed /claim attempt by user {user.id} ({user.username})")
+        await msg.reply_text(
+            f"🔐 <b>Pairing PIN Required</b>\n\n"
+            f"Check your local PC console, <code>logs/bot.log</code>, or <code>.tmp/pairing_code.txt</code> "
+            f"and send:\n<code>/claim &lt;PIN&gt;</code>",
             parse_mode=ParseMode.HTML,
         )
         return
 
     save_claimed_user(user.id)
-    await update.message.reply_text(
+    await msg.reply_text(
         f"✅ <b>Successfully Paired!</b>\n"
         f"Bot is now strictly locked to your User ID (<code>{user.id}</code>).\n\n"
         f"You can now send any coding prompt or tap buttons on the quick bar below.",
@@ -300,7 +446,11 @@ async def cmd_controls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
+    interactive_pid = await asyncio.to_thread(
+        find_interactive_agy_pid,
+        conv_id=runner.conversation_id,
+        workspace=runner.workspace_dir,
+    )
     status_text = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless"
 
     msg = (
@@ -308,7 +458,7 @@ async def cmd_controls(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>CLI Connection:</b> {status_text}\n"
         f"<i>Tap any button below to inject actions directly into your active terminal:</i>"
     )
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         msg,
         parse_mode=ParseMode.HTML,
         reply_markup=get_interactive_controls_markup(),
@@ -319,20 +469,23 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    recents = runner.get_recent_conversations(limit=5)
+    recents, active_procs = await asyncio.gather(
+        asyncio.to_thread(runner.get_recent_conversations, 5),
+        asyncio.to_thread(list_interactive_agy_processes),
+    )
     if not recents:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "ℹ️ No previous conversation sessions found.",
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
         return
 
-    from execution.console_injector import get_workspace_for_conversation
-    active_procs = list_interactive_agy_processes()
     active_pids: Dict[str, int] = {}
     for ap in active_procs:
         if ap.get("conv_id"):
             active_pids[ap["conv_id"]] = ap["pid"]
+
+    session_aliases = context.application.bot_data.setdefault("session_aliases", {})
 
     lines = ["📜 <b>Antigravity Session History:</b>\n"]
     keyboard = []
@@ -341,10 +494,13 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_active = " <b>[ACTIVE]</b>" if runner.conversation_id == s.conv_id else ""
         live_pid = active_pids.get(s.conv_id)
         if not live_pid:
-            ws = get_workspace_for_conversation(s.conv_id)
+            ws = await asyncio.to_thread(get_workspace_for_conversation, s.conv_id)
             if ws:
                 for ap in active_procs:
-                    if ap.get("cwd") and (ap["cwd"].lower() == ws.lower()):
+                    ap_conv = ap.get("conv_id")
+                    if ap_conv and ap_conv != s.conv_id:
+                        continue
+                    if _paths_match(ap.get("cwd", ""), ws):
                         live_pid = ap["pid"]
                         break
         live_badge = f" 🖥️ <i>(Live PID {live_pid})</i>" if live_pid else ""
@@ -353,14 +509,25 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   <i>\"{html.escape(s.preview)}\"</i>\n"
         )
         attach_label = f"✅ Active #{idx}" if runner.conversation_id == s.conv_id else f"🔗 Attach #{idx}"
+
+        # Telegram caps callback_data at 64 bytes
+        if len(f"attach:{s.conv_id}".encode("utf-8")) <= 64:
+            attach_cb = f"attach:{s.conv_id}"
+            logs_cb = f"logs:{s.conv_id}"
+        else:
+            tok = _short_token(s.conv_id)
+            session_aliases[tok] = s.conv_id
+            attach_cb = f"attach_tok:{tok}"
+            logs_cb = f"logs_tok:{tok}"
+
         keyboard.append([
-            InlineKeyboardButton(attach_label, callback_data=f"attach:{s.conv_id}"),
-            InlineKeyboardButton(f"📄 Logs #{idx}", callback_data=f"logs:{s.conv_id}"),
+            InlineKeyboardButton(attach_label, callback_data=attach_cb),
+            InlineKeyboardButton(f"📄 Logs #{idx}", callback_data=logs_cb),
         ])
 
     lines.append("<i>Tap 'Attach' to continue session, or 'Logs' to inspect history:</i>")
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=reply_markup)
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -372,9 +539,9 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].isdigit():
         limit = min(15, max(1, int(context.args[0])))
 
-    turns = runner.get_session_turns(limit=limit)
+    turns = await asyncio.to_thread(runner.get_session_turns, None, limit)
     if not turns:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "ℹ️ No recorded conversation turns found for active session.",
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
@@ -395,7 +562,13 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 <b>Agent:</b> {html.escape(m_preview)} <i>(Tools: {t['tools_count']})</i>\n"
         )
 
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=QUICK_ACTION_KEYBOARD)
+    full_text = "\n".join(lines)
+    if len(full_text) <= SAFE_TELEGRAM_LIMIT:
+        await update.effective_message.reply_text(full_text, parse_mode=ParseMode.HTML, reply_markup=QUICK_ACTION_KEYBOARD)
+    else:
+        doc = io.BytesIO(html_to_plain_text(full_text).encode("utf-8"))
+        doc.name = "session_history.txt"
+        await update.effective_message.reply_document(document=doc, caption="📜 Session History", reply_markup=QUICK_ACTION_KEYBOARD)
 
 
 async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -403,23 +576,24 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    msg = update.effective_message
     if not msg:
         return
 
     conv_id = context.args[0].strip() if context.args else None
-    target_id = conv_id or runner.conversation_id or runner._get_latest_conversation_id()
+    target_id = conv_id or runner.conversation_id or await asyncio.to_thread(runner._get_latest_conversation_id)
 
     if not target_id:
         await msg.reply_text("ℹ️ No active session to export logs from.", reply_markup=QUICK_ACTION_KEYBOARD)
         return
 
-    log_content = runner.get_session_log_export(conv_id=target_id, max_lines=250)
+    log_content = await asyncio.to_thread(runner.get_session_log_export, target_id, 250)
+    escaped_log = html.escape(log_content)
 
-    if len(log_content) <= 3500:
+    if len(escaped_log) <= 3500:
         await msg.reply_text(
-            f"📄 <b>Session Execution Log (<code>{target_id[:8]}...</code>):</b>\n\n"
-            f"<pre><code>{html.escape(log_content)}</code></pre>",
+            f"📄 <b>Session Execution Log (<code>{html.escape(target_id[:8])}...</code>):</b>\n\n"
+            f"<pre><code>{escaped_log}</code></pre>",
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
@@ -453,8 +627,49 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await cmd_screenshot(update, context)
             return
 
-        target_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
-        ok = inject_special_key(key_name, pid=target_pid)
+        if key_name == "cancel_confirm":
+            await query.answer("Canceled.")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        target_pid = await asyncio.to_thread(
+            find_interactive_agy_pid,
+            conv_id=runner.conversation_id,
+            workspace=runner.workspace_dir,
+        )
+
+        if key_name == "ctrl_c":
+            if target_pid and await asyncio.to_thread(is_agy_process_busy, target_pid):
+                confirm_markup = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("🛑 Confirm Stop (Ctrl+C)", callback_data="key:ctrl_c_confirmed"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="key:cancel_confirm"),
+                    ]
+                ])
+                await query.answer("⚠️ Active task in progress!", show_alert=True)
+                await query.message.reply_text(
+                    f"⚠️ <b>Terminal (PID {target_pid}) is actively executing a task.</b>\n"
+                    "Tap below to confirm interrupting it with Ctrl+C:",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=confirm_markup,
+                )
+                return
+
+        if key_name == "ctrl_c_confirmed":
+            key_name = "ctrl_c"
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            if stream_manager and update.effective_chat:
+                session = stream_manager.get_session(update.effective_chat.id)
+                if session and session.is_active:
+                    await session.cancel()
+
+        ok = await asyncio.to_thread(inject_special_key, key_name, pid=target_pid)
         if ok:
             await query.answer(f"Sent: {key_name.upper()}")
         else:
@@ -462,15 +677,28 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # 2. Attach Session
-    elif data.startswith("attach:"):
+    elif data.startswith("attach:") or data.startswith("attach_tok:"):
         await query.answer()
-        conv_id = data.split("attach:", 1)[1]
-        if runner.set_conversation(conv_id):
-            await query.edit_message_reply_markup(reply_markup=None)
+        if data.startswith("attach_tok:"):
+            tok = data.split("attach_tok:", 1)[1]
+            conv_id = context.application.bot_data.get("session_aliases", {}).get(tok, "")
+        else:
+            conv_id = data.split("attach:", 1)[1]
+
+        if conv_id and runner.set_conversation(conv_id):
+            save_bot_state()
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             watcher = context.application.bot_data.get("watcher")
-            if watcher:
+            if watcher and runner.conversation_id:
                 await watcher.switch_to_conv(runner.conversation_id)
-            target_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
+            target_pid = await asyncio.to_thread(
+                find_interactive_agy_pid,
+                conv_id=runner.conversation_id,
+                workspace=runner.workspace_dir,
+            )
             target_info = (
                 f"🖥️ <b>Desktop Terminal:</b> Live PID {target_pid}\n"
                 if target_pid
@@ -486,17 +714,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             )
         else:
             await query.message.reply_text(
-                f"❌ Failed to attach to session: <code>{html.escape(conv_id)}</code>",
+                f"❌ Failed to attach to session: <code>{html.escape(conv_id or '(expired)')}</code>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=QUICK_ACTION_KEYBOARD,
             )
+        return
 
     # 3. Export Logs for Session
-    elif data.startswith("logs:"):
+    elif data.startswith("logs:") or data.startswith("logs_tok:"):
         await query.answer("Fetching logs...")
-        conv_id = data.split("logs:", 1)[1]
-        context.args = [conv_id]
+        if data.startswith("logs_tok:"):
+            tok = data.split("logs_tok:", 1)[1]
+            conv_id = context.application.bot_data.get("session_aliases", {}).get(tok, "")
+        else:
+            conv_id = data.split("logs:", 1)[1]
+        context.args = [conv_id] if conv_id else []
         await cmd_logs(update, context)
+        return
 
     # 4. Workspace Navigation
     elif data.startswith("ws:"):
@@ -505,6 +739,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             parent = runner.get_parent_workspace()
             if parent:
                 runner.set_workspace(parent)
+                save_bot_state()
                 await query.answer(f"Switched to {os.path.basename(parent) or parent}")
                 text, markup = build_workspace_view(runner)
                 await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
@@ -513,38 +748,50 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         elif ws_action.startswith("sub:"):
-            try:
-                idx = int(ws_action.split("sub:", 1)[1])
-                subdirs = runner.get_workspace_subdirs(limit=6)
+            token = ws_action.split("sub:", 1)[1]
+            subdirs = runner.get_workspace_subdirs(limit=24)
+            chosen = None
+            for folder in subdirs:
+                if _short_token(folder) == token:
+                    chosen = folder
+                    break
+            if not chosen and token.isdigit():
+                idx = int(token)
                 if 0 <= idx < len(subdirs):
                     chosen = subdirs[idx]
-                    runner.set_workspace(chosen)
-                    await query.answer(f"Switched to {chosen}")
-                    text, markup = build_workspace_view(runner)
-                    await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
-                else:
-                    await query.answer("Folder not found", show_alert=True)
-            except Exception as e:
-                logger.debug(f"Subdir switch error: {e}")
+
+            if chosen and runner.set_workspace(chosen):
+                save_bot_state()
+                await query.answer(f"Switched to {chosen}")
+            else:
+                await query.answer("Folder list changed; refreshed view", show_alert=True)
+            text, markup = build_workspace_view(runner)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
             return
 
         elif ws_action.startswith("rec:"):
-            try:
-                idx = int(ws_action.split("rec:", 1)[1])
-                other_recents = [
-                    p for p in runner.recent_workspaces
-                    if os.path.abspath(p) != os.path.abspath(runner.workspace_dir)
-                ][:2]
+            token = ws_action.split("rec:", 1)[1]
+            other_recents = [
+                p for p in runner.recent_workspaces
+                if not _paths_match(p, runner.workspace_dir)
+            ]
+            chosen = None
+            for p in other_recents:
+                if _short_token(os.path.abspath(p)) == token:
+                    chosen = p
+                    break
+            if not chosen and token.isdigit():
+                idx = int(token)
                 if 0 <= idx < len(other_recents):
                     chosen = other_recents[idx]
-                    runner.set_workspace(chosen)
-                    await query.answer(f"Switched to {os.path.basename(chosen) or chosen}")
-                    text, markup = build_workspace_view(runner)
-                    await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
-                else:
-                    await query.answer("Recent workspace not found", show_alert=True)
-            except Exception as e:
-                logger.debug(f"Recent switch error: {e}")
+
+            if chosen and runner.set_workspace(chosen):
+                save_bot_state()
+                await query.answer(f"Switched to {os.path.basename(chosen) or chosen}")
+            else:
+                await query.answer("Recent workspace unavailable; refreshed", show_alert=True)
+            text, markup = build_workspace_view(runner)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
             return
 
         elif ws_action == "drives":
@@ -557,6 +804,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             letter = ws_action.split("drive:", 1)[1]
             drive_path = f"{letter}:\\"
             if runner.set_workspace(drive_path):
+                save_bot_state()
                 await query.answer(f"Switched to {drive_path}")
                 text, markup = build_workspace_view(runner)
                 await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
@@ -568,10 +816,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             pending = context.user_data.get("pending_mkdir")
             if pending and runner.create_and_set_workspace(pending):
                 context.user_data.pop("pending_mkdir", None)
+                save_bot_state()
                 await query.answer("Directory created!")
                 text, markup = build_workspace_view(runner)
                 await query.edit_message_text(
-                    f"📁 <b>Created & switched to workspace:</b>\n<code>{html.escape(runner.workspace_dir)}</code>\n\n{text}",
+                    f"📁 <b>Created &amp; switched to workspace:</b>\n<code>{html.escape(runner.workspace_dir)}</code>\n\n{text}",
                     reply_markup=markup,
                     parse_mode=ParseMode.HTML,
                 )
@@ -599,6 +848,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 watcher.resume()
             sync_enabled = watcher.is_enabled
+            save_bot_state(sync_enabled=sync_enabled)
             status_text = (
                 "🟢 <b>Live Sync: ENABLED</b>\n<i>PC terminal activity, thoughts, and output are mirrored live to Telegram.</i>"
                 if sync_enabled
@@ -606,7 +856,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             )
             toggle_btn = InlineKeyboardButton(
                 "🔕 Mute Live Sync" if sync_enabled else "🔔 Enable Live Sync",
-                callback_data="sync:toggle"
+                callback_data="sync:toggle",
             )
             await query.answer("Live Sync Toggled")
             await query.edit_message_text(status_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[toggle_btn]]))
@@ -616,12 +866,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 6. Auto-Start Toggle
     elif data == "autostart:toggle":
-        is_on = is_autostart_enabled()
+        is_on = await asyncio.to_thread(is_autostart_enabled)
         if is_on:
-            disable_autostart()
+            await asyncio.to_thread(disable_autostart)
         else:
-            enable_autostart()
-        new_state = is_autostart_enabled()
+            await asyncio.to_thread(enable_autostart)
+        new_state = await asyncio.to_thread(is_autostart_enabled)
         status_text = (
             "🚀 <b>Windows Auto-Start: ENABLED</b>\n<i>The Antigravity bot will launch silently in the background whenever you boot or log in to your laptop.</i>"
             if new_state
@@ -629,7 +879,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
         toggle_btn = InlineKeyboardButton(
             "🛑 Disable Auto-Start" if new_state else "🚀 Enable Auto-Start",
-            callback_data="autostart:toggle"
+            callback_data="autostart:toggle",
         )
         await query.answer("Auto-Start Updated")
         await query.edit_message_text(status_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[toggle_btn]]))
@@ -640,8 +890,9 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
+    msg = update.effective_message
     if not context.args:
-        await update.message.reply_text(
+        await msg.reply_text(
             "Usage: <code>/attach &lt;number (1-5) or conversation ID&gt;</code>\n"
             "Run /sessions first to view available sessions.",
             parse_mode=ParseMode.HTML,
@@ -650,7 +901,7 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target = context.args[0].strip()
-    recents = runner.get_recent_conversations(limit=10)
+    recents = await asyncio.to_thread(runner.get_recent_conversations, 10)
 
     chosen_id = None
     if target.isdigit():
@@ -658,7 +909,7 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 1 <= idx <= len(recents):
             chosen_id = recents[idx - 1].conv_id
         else:
-            await update.message.reply_text(
+            await msg.reply_text(
                 f"❌ Invalid session number. Choose between 1 and {len(recents)}.",
                 reply_markup=QUICK_ACTION_KEYBOARD,
             )
@@ -667,10 +918,11 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chosen_id = target
 
     if runner.set_conversation(chosen_id):
+        save_bot_state()
         watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
         if watcher and runner.conversation_id:
             await watcher.switch_to_conv(runner.conversation_id)
-        await update.message.reply_text(
+        await msg.reply_text(
             f"🔗 <b>Attached to Conversation Session:</b>\n"
             f"<code>{html.escape(runner.conversation_id)}</code>\n\n"
             f"All your future prompts and live PC terminal activity will now synchronize with this session!",
@@ -678,7 +930,7 @@ async def cmd_attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
     else:
-        await update.message.reply_text(
+        await msg.reply_text(
             f"❌ Could not find session: <code>{html.escape(chosen_id)}</code>\n"
             f"Run /sessions to view valid sessions.",
             parse_mode=ParseMode.HTML,
@@ -691,7 +943,7 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    msg = update.effective_message
     if not msg:
         return
 
@@ -706,13 +958,13 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif arg in ("on", "enable", "start", "resume", "unmute"):
         watcher.resume()
     else:
-        # Toggle
         if watcher.is_enabled:
             watcher.pause()
         else:
             watcher.resume()
 
     sync_enabled = watcher.is_enabled
+    save_bot_state(sync_enabled=sync_enabled)
     status_text = (
         "🟢 <b>Live Sync: ENABLED</b>\n<i>PC terminal activity, thoughts, and outputs are mirrored live to Telegram.</i>"
         if sync_enabled
@@ -720,7 +972,7 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     toggle_btn = InlineKeyboardButton(
         "🔕 Mute Live Sync" if sync_enabled else "🔔 Enable Live Sync",
-        callback_data="sync:toggle"
+        callback_data="sync:toggle",
     )
     await msg.reply_text(
         status_text,
@@ -734,23 +986,22 @@ async def cmd_autostart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    msg = update.effective_message
     if not msg:
         return
 
     arg = context.args[0].lower() if context.args else None
     if arg in ("on", "enable", "start", "yes", "1"):
-        enable_autostart()
+        await asyncio.to_thread(enable_autostart)
     elif arg in ("off", "disable", "stop", "no", "0"):
-        disable_autostart()
+        await asyncio.to_thread(disable_autostart)
     else:
-        # Toggle
-        if is_autostart_enabled():
-            disable_autostart()
+        if await asyncio.to_thread(is_autostart_enabled):
+            await asyncio.to_thread(disable_autostart)
         else:
-            enable_autostart()
+            await asyncio.to_thread(enable_autostart)
 
-    new_state = is_autostart_enabled()
+    new_state = await asyncio.to_thread(is_autostart_enabled)
     status_text = (
         "🚀 <b>Windows Auto-Start: ENABLED</b>\n<i>The Antigravity bot will launch silently in the background whenever you boot or log in to your laptop.</i>"
         if new_state
@@ -758,7 +1009,7 @@ async def cmd_autostart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     toggle_btn = InlineKeyboardButton(
         "🛑 Disable Auto-Start" if new_state else "🚀 Enable Auto-Start",
-        callback_data="autostart:toggle"
+        callback_data="autostart:toggle",
     )
     await msg.reply_text(
         status_text,
@@ -771,41 +1022,46 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    cpu_pct = psutil.cpu_percent(interval=0.1)
+    cpu_pct, interactive_pid, autostart_on = await asyncio.gather(
+        asyncio.to_thread(psutil.cpu_percent, 0.1),
+        asyncio.to_thread(
+            find_interactive_agy_pid,
+            conv_id=runner.conversation_id,
+            workspace=runner.workspace_dir,
+        ),
+        asyncio.to_thread(is_autostart_enabled),
+    )
     mem = psutil.virtual_memory()
     agent_state = "🟡 Running" if runner.is_running else "🟢 Idle"
     conv_text = f"<code>{runner.conversation_id}</code>" if runner.conversation_id else "Auto-Continuous"
-    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     screen_status = f"🟢 Connected (PID {interactive_pid})" if interactive_pid else "⚪ Headless (No active terminal)"
 
     watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
     sync_enabled = watcher.is_enabled if watcher else False
     sync_desc = "🟢 Active (Live Mirror)" if sync_enabled else "⚪ Paused (Silent Mode)"
-
-    autostart_on = is_autostart_enabled()
     auto_desc = "🟢 Enabled (Runs on Windows boot)" if autostart_on else "⚪ Disabled"
 
     status_msg = (
-        f"📊 <b>System & Remote Control Status</b>\n\n"
+        f"📊 <b>System &amp; Remote Control Status</b>\n\n"
         f"<b>CLI Connection:</b> {screen_status}\n"
         f"<b>Agent Status:</b> {agent_state}\n"
         f"<b>Live PC Sync:</b> {sync_desc}\n"
         f"<b>Auto-Start:</b> {auto_desc}\n"
         f"<b>Workspace:</b> <code>{html.escape(runner.workspace_dir)}</code>\n"
         f"<b>Active Session:</b> {conv_text}\n"
-        f"<b>Terminal Engine:</b> 🟢 Live Output Streaming + Paced Keystroke Injector\n"
+        f"<b>Terminal Engine:</b> 🟢 Stream-JSON + Isolated Console Injector\n"
         f"<b>Host CPU:</b> {cpu_pct}%\n"
         f"<b>Host RAM:</b> {mem.percent}% ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)"
     )
     sync_btn = InlineKeyboardButton(
         "🔕 Mute Live Sync" if sync_enabled else "🔔 Enable Live Sync",
-        callback_data="sync:toggle"
+        callback_data="sync:toggle",
     )
     auto_btn = InlineKeyboardButton(
         "🛑 Disable Auto-Start" if autostart_on else "🚀 Enable Auto-Start",
-        callback_data="autostart:toggle"
+        callback_data="autostart:toggle",
     )
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         status_msg,
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([[sync_btn, auto_btn]]),
@@ -816,7 +1072,7 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    msg = update.effective_message
     if not msg:
         return
 
@@ -833,22 +1089,35 @@ async def cmd_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
+        interactive_pid = await asyncio.to_thread(
+            find_interactive_agy_pid,
+            conv_id=runner.conversation_id,
+            workspace=runner.workspace_dir,
+        )
         title = f"Antigravity Terminal (PID {interactive_pid})" if interactive_pid else "Antigravity Console"
-        img_bytes, caption = get_screenshot(fallback_terminal_text=active_terminal_text, title=title)
+        img_bytes, caption = await asyncio.to_thread(
+            get_screenshot,
+            fallback_terminal_text=active_terminal_text,
+            title=title,
+        )
 
         photo_stream = io.BytesIO(img_bytes)
         photo_stream.name = "screenshot.jpg" if img_bytes.startswith(b"\xff\xd8") else "screenshot.png"
 
-        await msg.reply_photo(
-            photo=photo_stream,
-            caption=f"{caption}\n<i>Host: Windows | Screen Control: {'🟢 Connected' if interactive_pid else '⚪ Headless'}</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=QUICK_ACTION_KEYBOARD,
-            write_timeout=60,
-            read_timeout=60,
+        await call_with_retry(
+            lambda: msg.reply_photo(
+                photo=photo_stream,
+                caption=f"{caption}\n<i>Host: Windows | Screen Control: {'🟢 Connected' if interactive_pid else '⚪ Headless'}</i>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=QUICK_ACTION_KEYBOARD,
+                write_timeout=60,
+                read_timeout=60,
+            )
         )
-        await status_msg.delete()
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Failed to capture screenshot: {e}")
         await status_msg.edit_text(
@@ -872,32 +1141,28 @@ def build_workspace_view(runner_instance: AntigravityRunner) -> Tuple[str, Inlin
 
     keyboard: List[List[InlineKeyboardButton]] = []
 
-    # 1. Parent directory button
     if parent:
         parent_name = os.path.basename(parent) or parent
         keyboard.append([InlineKeyboardButton(f"📂 ⬆️ Parent ({parent_name})", callback_data="ws:up")])
 
-    # 2. Child directories (2 per row)
     row: List[InlineKeyboardButton] = []
-    for idx, folder in enumerate(subdirs):
+    for folder in subdirs:
         display = folder if len(folder) <= 18 else folder[:16] + ".."
-        row.append(InlineKeyboardButton(f"📁 {display}", callback_data=f"ws:sub:{idx}"))
+        row.append(InlineKeyboardButton(f"📁 {display}", callback_data=f"ws:sub:{_short_token(folder)}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
 
-    # 3. Recent workspaces (up to 2)
     other_recents = [
         p for p in runner_instance.recent_workspaces
-        if os.path.abspath(p) != os.path.abspath(current)
+        if not _paths_match(p, current)
     ][:2]
-    for idx, rpath in enumerate(other_recents):
+    for rpath in other_recents:
         rname = os.path.basename(rpath) or rpath
-        keyboard.append([InlineKeyboardButton(f"🕒 Switch: {rname}", callback_data=f"ws:rec:{idx}")])
+        keyboard.append([InlineKeyboardButton(f"🕒 Switch: {rname}", callback_data=f"ws:rec:{_short_token(os.path.abspath(rpath))}")])
 
-    # 4. System drives & tools
     keyboard.append([
         InlineKeyboardButton("💾 Drives", callback_data="ws:drives"),
         InlineKeyboardButton("🔄 Refresh", callback_data="ws:refresh"),
@@ -935,17 +1200,13 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    msg = update.effective_message
     if not msg:
         return
 
     if not context.args:
         text, markup = build_workspace_view(runner)
-        await msg.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-        )
+        await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         return
 
     if runner.is_running:
@@ -958,17 +1219,14 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_path = " ".join(context.args).strip('"').strip("'")
     if runner.set_workspace(target_path):
+        save_bot_state()
         text, markup = build_workspace_view(runner)
         header = (
             f"✅ <b>Workspace switched to:</b>\n"
             f"<code>{html.escape(runner.workspace_dir)}</code>\n\n"
             f"<i>Next prompts will execute in this directory with a clean session.</i>\n\n"
         )
-        await msg.reply_text(
-            f"{header}{text}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-        )
+        await msg.reply_text(f"{header}{text}", parse_mode=ParseMode.HTML, reply_markup=markup)
     else:
         resolved = runner.resolve_path(target_path)
         context.user_data["pending_mkdir"] = resolved
@@ -988,21 +1246,17 @@ async def cmd_pwd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    msg = update.effective_message
     if msg:
         text, markup = build_workspace_view(runner)
-        await msg.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-        )
+        await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    msg = update.effective_message or (update.callback_query.message if update.callback_query else None)
+    msg = update.effective_message
     if not msg:
         return
 
@@ -1016,9 +1270,10 @@ async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_path = " ".join(context.args).strip('"').strip("'")
     if runner.create_and_set_workspace(target_path):
+        save_bot_state()
         text, markup = build_workspace_view(runner)
         await msg.reply_text(
-            f"📁 <b>Created & switched to workspace:</b>\n<code>{html.escape(runner.workspace_dir)}</code>\n\n{text}",
+            f"📁 <b>Created &amp; switched to workspace:</b>\n<code>{html.escape(runner.workspace_dir)}</code>\n\n{text}",
             parse_mode=ParseMode.HTML,
             reply_markup=markup,
         )
@@ -1035,7 +1290,8 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     runner.reset_conversation()
-    await update.message.reply_text(
+    save_bot_state()
+    await update.effective_message.reply_text(
         "🔄 <b>Conversation session reset.</b>\nNext prompt will start a clean turn.",
         parse_mode=ParseMode.HTML,
         reply_markup=QUICK_ACTION_KEYBOARD,
@@ -1046,17 +1302,41 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
+    msg = update.effective_message
     chat_id = update.effective_chat.id
+
+    interactive_pid = await asyncio.to_thread(
+        find_interactive_agy_pid,
+        conv_id=runner.conversation_id,
+        workspace=runner.workspace_dir,
+    )
+    force_stop = bool(context.args and context.args[0].lower() in ("now", "confirm", "yes", "force"))
+
+    # Prompt for confirmation BEFORE cancelling the active stream UI if terminal is busy
+    if interactive_pid and not force_stop and await asyncio.to_thread(is_agy_process_busy, interactive_pid):
+        confirm_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🛑 Yes, Send Ctrl+C", callback_data="key:ctrl_c_confirmed"),
+                InlineKeyboardButton("❌ Cancel", callback_data="key:cancel_confirm"),
+            ]
+        ])
+        await msg.reply_text(
+            f"⚠️ <b>Terminal (PID {interactive_pid}) is actively executing a task.</b>\n\n"
+            "Sending <code>Ctrl+C</code> will abort the current command.\n"
+            "To confirm, tap below or send <code>/stop confirm</code>:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_markup,
+        )
+        return
+
     if stream_manager:
         session = stream_manager.get_session(chat_id)
         if session and session.is_active:
             await session.cancel()
 
-    # Also attempt sending Ctrl+C into open interactive terminal
-    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
     injected_stop = False
     if interactive_pid:
-        injected_stop = inject_special_key("ctrl_c", pid=interactive_pid)
+        injected_stop = await asyncio.to_thread(inject_special_key, "ctrl_c", pid=interactive_pid)
 
     if not runner.is_running:
         if interactive_pid:
@@ -1067,22 +1347,18 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             status_desc = "ℹ️ <b>No active Antigravity task is currently executing.</b>"
-        await update.message.reply_text(
-            status_desc,
-            parse_mode=ParseMode.HTML,
-            reply_markup=QUICK_ACTION_KEYBOARD,
-        )
+        await msg.reply_text(status_desc, parse_mode=ParseMode.HTML, reply_markup=QUICK_ACTION_KEYBOARD)
         return
 
     killed = await runner.cancel()
     if killed:
-        await update.message.reply_text(
+        await msg.reply_text(
             "🛑 <b>Active headless task killed successfully.</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
     else:
-        await update.message.reply_text(
+        await msg.reply_text(
             "⚠️ Could not kill process (it may have already completed).",
             reply_markup=QUICK_ACTION_KEYBOARD,
         )
@@ -1097,11 +1373,12 @@ async def _verify_injection_progress(
     """Monitors whether real tool/transcript output starts within timeout_seconds after injection."""
     await asyncio.sleep(timeout_seconds)
     if session and session.is_active and not session.has_real_output:
-        logger.warning(f"Desktop terminal PID {pid} produced no output 15s after prompt injection.")
+        logger.warning(f"Desktop terminal PID {pid} produced no output {int(timeout_seconds)}s after prompt injection.")
+        preview = _preview_prompt(user_prompt, 220)
         session.set_header_info(
             f"<b>Injected to Desktop Terminal (PID {pid}):</b>\n"
-            f"&gt; <i>{html.escape(user_prompt)}</i>\n\n"
-            f"⚠️ <i>No execution logs detected after 15s. The desktop terminal may be waiting for confirmation or input.</i>\n"
+            f"&gt; <i>{html.escape(preview)}</i>\n\n"
+            f"⚠️ <i>No execution logs detected after {int(timeout_seconds)}s. The desktop terminal may be waiting for confirmation or input.</i>\n"
             f"💡 <i>Tap <b>/controls</b> or send <b>/screenshot</b> to view current terminal state.</i>"
         )
 
@@ -1110,54 +1387,59 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_auth(update):
         return
 
-    user_prompt = update.message.text.strip()
+    msg = update.effective_message
+    if not msg or not msg.text:
+        return
+
+    user_prompt = msg.text.strip()
     if not user_prompt:
         return
 
     chat_id = update.effective_chat.id
 
-    # 1. Quick-Action Bottom Bar Keyboard Button Interception
+    # 1. Quick-Action Bottom Bar Keyboard Button & Clear Text Command Interception
     prompt_norm = user_prompt.strip()
-    if prompt_norm in ("📊 Status", "status"):
+    prompt_lower = prompt_norm.lower()
+    if prompt_norm == "📊 Status" or prompt_lower == "status":
         await cmd_status(update, context)
         return
-    elif prompt_norm in ("📜 Sessions", "sessions"):
+    elif prompt_norm == "📜 Sessions" or prompt_lower == "sessions":
         await cmd_sessions(update, context)
         return
-    elif prompt_norm in ("📸 Screenshot", "screenshot"):
+    elif prompt_norm == "📸 Screenshot" or prompt_lower == "screenshot":
         await cmd_screenshot(update, context)
         return
-    elif prompt_norm in ("📁 PWD", "pwd", "workspace", "/workspace"):
+    elif prompt_norm == "📁 PWD" or prompt_lower in ("pwd", "workspace", "/workspace"):
         await cmd_pwd(update, context)
         return
-    elif prompt_norm.lower().startswith("cd ") or prompt_norm.lower() == "cd":
-        target = user_prompt[3:].strip() if prompt_norm.lower().startswith("cd ") else ""
+    elif prompt_lower.startswith("cd ") or prompt_lower == "cd":
+        target = user_prompt[3:].strip() if prompt_lower.startswith("cd ") else ""
         context.args = target.split() if target else []
         await cmd_cd(update, context)
         return
-    elif prompt_norm in ("🎮 Controls", "controls", "keypad"):
+    elif prompt_norm == "🎮 Controls" or prompt_lower in ("controls", "keypad"):
         await cmd_controls(update, context)
         return
-    elif prompt_norm in ("🛑 Stop Task", "stop", "cancel"):
+    elif prompt_norm == "🛑 Stop Task" or prompt_lower in ("stop", "cancel"):
         await cmd_stop(update, context)
         return
-    elif prompt_norm in ("history", "/history"):
+    elif prompt_lower in ("history", "/history"):
         await cmd_history(update, context)
         return
-    elif prompt_norm in ("logs", "/logs"):
+    elif prompt_lower in ("logs", "/logs"):
         await cmd_logs(update, context)
         return
-    elif prompt_norm in ("sync", "/sync", "livesync", "/livesync", "mute", "/mute", "unmute", "/unmute"):
+    elif prompt_lower in ("/sync", "/livesync", "/mute", "/unmute"):
         await cmd_sync(update, context)
         return
-    elif prompt_norm in ("autostart", "/autostart", "startup", "/startup", "boot"):
+    elif prompt_lower in ("/autostart", "/startup"):
         await cmd_autostart(update, context)
         return
 
     # 2. Shortcut handling for 'attach'
-    cleaned_input = user_prompt.lower().replace("...", "").strip()
+    cleaned_input = prompt_lower.replace("...", "").strip()
     if cleaned_input.startswith("attach "):
-        target_arg = user_prompt.split("attach ", 1)[1].strip()
+        target_arg = user_prompt.split(" ", 1)[1].strip()
         context.args = [target_arg]
         await cmd_attach(update, context)
         return
@@ -1169,14 +1451,16 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and all(c in string.hexdigits or c == "-" for c in cleaned_input)
     )
     if is_uuid_prefix:
-        matched = [
-            s for s in runner.get_recent_conversations(limit=10)
-            if s.conv_id.startswith(cleaned_input) or s.conv_id.lower().startswith(cleaned_input)
-        ]
+        recents = await asyncio.to_thread(runner.get_recent_conversations, 10)
+        matched = [s for s in recents if s.conv_id.lower().startswith(cleaned_input)]
         if len(matched) == 1:
             conv_id = matched[0].conv_id
             if runner.set_conversation(conv_id):
-                await update.message.reply_text(
+                save_bot_state()
+                watcher = context.application.bot_data.get("watcher")
+                if watcher:
+                    await watcher.switch_to_conv(conv_id)
+                await msg.reply_text(
                     f"🔗 <b>Auto-Attached to Session:</b>\n<code>{html.escape(conv_id)}</code>\n\n"
                     f"<i>Topic: \"{html.escape(matched[0].preview)}\"</i>\n\n"
                     f"You are now continuing this conversation with full history!",
@@ -1186,45 +1470,53 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
     # 3. Check if an interactive terminal window is open on desktop for the target session or workspace
-    interactive_pid = find_interactive_agy_pid(conv_id=runner.conversation_id, workspace=runner.workspace_dir)
+    interactive_pid = await asyncio.to_thread(
+        find_interactive_agy_pid,
+        conv_id=runner.conversation_id,
+        workspace=runner.workspace_dir,
+    )
+    reused_session = None
     if interactive_pid and stream_manager:
-        # If no explicit session is attached yet, auto-bind to this interactive process's session
-        if not runner.conversation_id:
-            from execution.console_injector import get_agy_process_conv_id
-            try:
-                proc_conv = get_agy_process_conv_id(psutil.Process(interactive_pid))
-                if proc_conv:
-                    runner.set_conversation(proc_conv)
-            except Exception:
-                pass
+        # Sync to interactive process's active session ID if unbound or updated
+        try:
+            proc_conv = await asyncio.to_thread(get_agy_process_conv_id, psutil.Process(interactive_pid))
+            if proc_conv and (not runner.conversation_id):
+                runner.set_conversation(proc_conv)
+                save_bot_state()
+        except Exception:
+            pass
 
         session_title = f"Antigravity Live PC Screen (PID {interactive_pid})"
         session = await stream_manager.start_session(
             chat_id=chat_id,
             title=session_title,
             initial_status="Injecting Prompt...",
-            initial_prompt=user_prompt,
+            initial_prompt=_preview_prompt(user_prompt, 120),
         )
 
         busy_note = ""
-        if is_agy_process_busy(interactive_pid):
-            busy_note = "\n<i>Note: Terminal is busy with active subtasks; prompt queued into input buffer.</i>"
+        if await asyncio.to_thread(is_agy_process_busy, interactive_pid):
+            busy_note = "\n<i>Note: Terminal was busy with active subtasks; waited for idle before injecting.</i>"
+            for _ in range(20):
+                await asyncio.sleep(0.5)
+                if not await asyncio.to_thread(is_agy_process_busy, interactive_pid):
+                    break
 
-        injected = inject_text_to_agy(user_prompt, pid=interactive_pid)
+        injected = await asyncio.to_thread(inject_text_to_agy, user_prompt, pid=interactive_pid)
         if injected:
+            preview = _preview_prompt(user_prompt, 220)
             session.set_header_info(
                 f"<b>Injected to Desktop Terminal (PID {interactive_pid}):</b>\n"
-                f"&gt; <i>{html.escape(user_prompt)}</i>{busy_note}"
+                f"&gt; <i>{html.escape(preview)}</i>{busy_note}"
             )
 
-            # Ensure watcher is actively tracking this session and live sync is unmuted for user-initiated prompt
-            watcher = context.application.bot_data.get("watcher")
+            watcher: Optional[TranscriptWatcher] = context.application.bot_data.get("watcher")
             if watcher:
                 watcher.is_enabled = True
+                save_bot_state(sync_enabled=True)
                 if runner.conversation_id:
                     await watcher.switch_to_conv(runner.conversation_id)
 
-            # Verification watchdog: if no real output arrives within 15 seconds, notify and offer controls
             asyncio.create_task(
                 _verify_injection_progress(
                     session=session,
@@ -1235,13 +1527,15 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         else:
-            session.set_header_info(
-                f"⚠️ <b>Direct injection failed on PID {interactive_pid}.</b> Falling back to autonomous runner..."
+            # Reuse the active message for headless fallback instead of spawning a second stream message
+            reused_session = session
+            reused_session.set_header_info(
+                f"⚠️ <b>Direct injection failed on PID {interactive_pid}.</b> Running in autonomous headless mode..."
             )
 
     # 4. Headless execution fallback
     if runner.is_running:
-        await update.message.reply_text(
+        await msg.reply_text(
             "⚠️ An Antigravity task is already executing. Send /stop to cancel it first.",
             parse_mode=ParseMode.HTML,
             reply_markup=QUICK_ACTION_KEYBOARD,
@@ -1251,22 +1545,25 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     assert stream_manager is not None
     session_title = f"Antigravity Session ({runner.conversation_id[:8]}...)" if runner.conversation_id else "Antigravity Session"
 
-    # Step 1: Session starts -> Send persistent message if not already active
-    session = stream_manager.get_session(chat_id)
+    session = reused_session or stream_manager.get_session(chat_id)
     if not session or not session.is_active:
         session = await stream_manager.start_session(
             chat_id=chat_id,
             title=session_title,
             initial_status="Started",
-            initial_prompt=user_prompt,
+            initial_prompt=_preview_prompt(user_prompt, 120),
             edit_interval=1.0,
             buffer_debounce=0.5,
         )
 
-    # Step 2 & 3 & 4: Output arrives continuously from process -> buffered & edited ~1s
     result = await runner.execute_prompt(user_prompt, on_chunk=session.feed)
 
-    # Step 5: Task completes or important events occur
+    # Advance watcher past this headless turn so TranscriptWatcher does not double-send the response
+    watcher = context.application.bot_data.get("watcher")
+    if watcher and runner.conversation_id:
+        await watcher.mark_conv_caught_up(runner.conversation_id)
+    save_bot_state()
+
     if result.is_cancelled:
         await session.cancel()
         return
@@ -1279,7 +1576,6 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conv_footer = f"\n\n<i>Session: <code>{runner.conversation_id}</code></i>" if runner.conversation_id else ""
     formatted_html = markdown_to_telegram_html(final_text)
 
-    # Send separate completion notification with interactive keypad
     event_notification = f"✅ <b>Task Completed:</b>\n\n{formatted_html}{conv_footer}"
     await session.complete(
         final_status="Completed",
@@ -1289,6 +1585,25 @@ async def handle_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def check_single_instance() -> bool:
+    """Enforces single-instance execution via Win32 named mutex (in production) and PID lock file."""
+    global _single_instance_mutex_handle
+
+    is_default_pid = os.path.abspath(PID_FILE) == os.path.abspath(DEFAULT_PID_FILE)
+    if os.name == "nt" and is_default_pid:
+        try:
+            kernel32 = ctypes.windll.kernel32
+            mutex_handle = kernel32.CreateMutexW(None, False, "Local\\AntigravityTelegramBotSingleInstance")
+            last_err = kernel32.GetLastError()
+            # ERROR_ALREADY_EXISTS = 183
+            if last_err == 183:
+                if mutex_handle:
+                    kernel32.CloseHandle(mutex_handle)
+                logger.warning("Another instance is already holding the single-instance mutex. Exiting.")
+                return False
+            _single_instance_mutex_handle = mutex_handle
+        except Exception as e:
+            logger.debug(f"Named mutex check fallback to PID file: {e}")
+
     if os.path.exists(PID_FILE):
         try:
             with open(PID_FILE, "r") as f:
@@ -1296,8 +1611,13 @@ def check_single_instance() -> bool:
             if old_pid != os.getpid() and psutil.pid_exists(old_pid):
                 try:
                     proc = psutil.Process(old_pid)
-                    cmdline = proc.cmdline() or []
-                    if "python" in proc.name().lower() and any("telegram_bot" in arg.lower() for arg in cmdline):
+                    pname = proc.name().lower()
+                    cmdline = [arg.lower() for arg in (proc.cmdline() or [])]
+                    is_bot_proc = (
+                        "antigravity-bot" in pname
+                        or any("telegram_bot" in arg or "antigravity-bot" in arg for arg in cmdline)
+                    )
+                    if is_bot_proc:
                         logger.warning(f"Another instance is already running with PID {old_pid}. Exiting.")
                         return False
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -1306,10 +1626,14 @@ def check_single_instance() -> bool:
             pass
 
     current_pid = os.getpid()
+    pid_dir = os.path.dirname(os.path.abspath(PID_FILE))
+    if pid_dir:
+        os.makedirs(pid_dir, exist_ok=True)
     with open(PID_FILE, "w") as f:
         f.write(str(current_pid))
 
     def cleanup():
+        global _single_instance_mutex_handle
         try:
             if os.path.exists(PID_FILE):
                 with open(PID_FILE, "r") as f:
@@ -1318,9 +1642,67 @@ def check_single_instance() -> bool:
                     os.remove(PID_FILE)
         except Exception:
             pass
+        if _single_instance_mutex_handle and os.name == "nt":
+            try:
+                ctypes.windll.kernel32.CloseHandle(_single_instance_mutex_handle)
+            except Exception:
+                pass
+            _single_instance_mutex_handle = None
 
     atexit.register(cleanup)
     return True
+
+
+async def _send_pc_fallback_message(bot: Any, user_id: int, event_notification: str, content: str) -> None:
+    """Delivers mirrored PC responses safely with length splitting, retries, and plain-text fallback."""
+    plain_len = len(html_to_plain_text(event_notification))
+    if len(event_notification) <= SAFE_TELEGRAM_LIMIT and plain_len <= SAFE_TELEGRAM_LIMIT:
+        try:
+            await call_with_retry(
+                lambda: bot.send_message(
+                    chat_id=user_id,
+                    text=event_notification,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_interactive_controls_markup(),
+                )
+            )
+            return
+        except Exception as html_err:
+            err_lower = str(html_err).lower()
+            if "can't parse entities" in err_lower or "message is too long" in err_lower or "bad request" in err_lower:
+                logger.warning(f"HTML send failed in on_pc_model(), falling back to plain text: {html_err}")
+                plain_body = html_to_plain_text(event_notification)[:SAFE_TELEGRAM_LIMIT]
+                await call_with_retry(
+                    lambda: bot.send_message(
+                        chat_id=user_id,
+                        text=plain_body,
+                        parse_mode=None,
+                        reply_markup=get_interactive_controls_markup(),
+                    )
+                )
+                return
+            raise
+
+    await call_with_retry(
+        lambda: bot.send_message(
+            chat_id=user_id,
+            text="🤖 <b>[Antigravity Response]</b>\n<i>(Output attached below due to length)</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_interactive_controls_markup(),
+        )
+    )
+    raw_bytes = content.encode("utf-8")
+
+    async def _send_doc():
+        doc = io.BytesIO(raw_bytes)
+        doc.name = "antigravity_pc_output.txt"
+        return await bot.send_document(
+            chat_id=user_id,
+            document=doc,
+            caption="📄 Antigravity Output",
+        )
+
+    await call_with_retry(_send_doc)
 
 
 async def post_init(application: Application):
@@ -1340,18 +1722,19 @@ async def post_init(application: Application):
     application.bot_data["stream_manager"] = stream_manager
 
     async def on_pc_user(conv_id: str, prompt: str):
+        short_prompt = _preview_prompt(prompt, 120)
         for user_id in ALLOWED_USER_IDS:
             try:
                 session = stream_manager.get_session(user_id)
                 if session and session.is_active:
                     session._status = "Working..."
-                    session.progress.operation_title = prompt
+                    session.progress.operation_title = short_prompt
                 else:
                     await stream_manager.start_session(
                         chat_id=user_id,
                         title="Antigravity PC Screen Session",
                         initial_status="User Input Detected",
-                        initial_prompt=prompt,
+                        initial_prompt=short_prompt,
                     )
             except Exception as e:
                 logger.warning(f"Failed to initialize PC stream session: {e}")
@@ -1389,38 +1772,23 @@ async def post_init(application: Application):
                 )
             else:
                 try:
-                    if len(event_notification) <= 3900:
-                        await application.bot.send_message(
-                            chat_id=user_id,
-                            text=event_notification,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=get_interactive_controls_markup(),
-                        )
-                    else:
-                        doc = io.BytesIO(content.encode("utf-8"))
-                        doc.name = "antigravity_pc_output.txt"
-                        await application.bot.send_message(
-                            chat_id=user_id,
-                            text="🤖 <b>[Antigravity Response]</b>\n<i>(Output attached below due to length)</i>",
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=get_interactive_controls_markup(),
-                        )
-                        await application.bot.send_document(
-                            chat_id=user_id,
-                            document=doc,
-                            caption="📄 Antigravity Output",
-                        )
+                    await _send_pc_fallback_message(application.bot, user_id, event_notification, content)
                 except Exception as e:
                     logger.warning(f"Failed to mirror PC response: {e}")
 
+    def _resolve_watched_conv() -> Optional[str]:
+        return runner.conversation_id or runner._get_latest_conversation_id()
+
     watcher = TranscriptWatcher(
         brain_dir=runner.brain_dir,
-        get_active_conv_id=lambda: runner.conversation_id or runner._get_latest_conversation_id(),
+        get_active_conv_id=_resolve_watched_conv,
         is_bot_running=lambda: runner.is_running,
         on_user_turn=on_pc_user,
         on_model_turn=on_pc_model,
         on_activity_step=on_pc_activity_step,
     )
+    if not _desired_sync_enabled:
+        watcher.pause()
     watcher.start()
     application.bot_data["watcher"] = watcher
     logger.info("Hybrid streaming manager and transcript mirror watcher active.")
@@ -1433,12 +1801,32 @@ async def post_shutdown(application: Application):
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Logs unexpected exceptions cleanly without crashing."""
-    logger.error("Unhandled exception occurred:", exc_info=context.error)
+    """Logs unexpected exceptions cleanly without noisy offline stack traces and alerts user on handler errors."""
+    err = context.error
+    if isinstance(err, (NetworkError, TimedOut)):
+        logger.warning(f"Transient Telegram network error: {err}")
+        return
+
+    logger.error("Unhandled exception occurred:", exc_info=err)
+    if isinstance(update, Update) and update.effective_message and err is not None:
+        try:
+            safe_err = sanitize_secrets(str(err))[:300]
+            await update.effective_message.reply_text(
+                f"⚠️ <b>Internal Error:</b> <code>{html.escape(safe_err)}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
 
 def run_bot():
     logger.info("Initializing Antigravity Remote Control with Interactive Controls & Session History...")
+    if not ALLOWED_USER_IDS:
+        pin = get_or_create_pairing_pin()
+        msg = f"Bot unclaimed (Setup Mode). One-time pairing PIN: {pin} (send /claim {pin} in Telegram)"
+        logger.info(msg)
+        print(f"\n[SETUP MODE] {msg}\n")
+
     request_config = HTTPXRequest(
         connection_pool_size=16,
         read_timeout=35.0,
@@ -1455,7 +1843,6 @@ def run_bot():
         .build()
     )
 
-    # Register handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("claim", cmd_claim))
     app.add_handler(CommandHandler("sessions", cmd_sessions))
@@ -1494,6 +1881,8 @@ def run_bot():
 
 
 def main():
+    configure_logging()
+
     if not check_single_instance():
         print("\n====================================================")
         print("  [!] Antigravity Telegram Bot is already running.")
@@ -1503,6 +1892,8 @@ def main():
     if not BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN is missing in .env")
         return
+
+    restore_bot_state()
 
     consecutive_failures = 0
     while True:

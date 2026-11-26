@@ -187,3 +187,111 @@ def test_transcript_watcher_partial_line_handling(tmp_path):
         assert user_turns[0][1] == "Execute build"
 
     asyncio.run(run_test())
+
+
+def test_transcript_watcher_multi_session_no_thrash_or_duplicate(tmp_path):
+    async def run_test():
+        conv_a = "conv-alpha-1111"
+        conv_b = "conv-beta-2222"
+        for cid in (conv_a, conv_b):
+            logs = tmp_path / cid / ".system_generated" / "logs"
+            logs.mkdir(parents=True)
+
+        file_a = tmp_path / conv_a / ".system_generated" / "logs" / "transcript.jsonl"
+        file_b = tmp_path / conv_b / ".system_generated" / "logs" / "transcript.jsonl"
+
+        # Seed conv_a with an active uncompleted user turn
+        file_a.write_text(
+            json.dumps({
+                "step_index": 10,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "<USER_REQUEST>Task A</USER_REQUEST>",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        file_b.write_text(
+            json.dumps({
+                "step_index": 5,
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "<USER_REQUEST>Task B</USER_REQUEST>",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        active = [conv_a]
+        user_turns = []
+
+        async def on_user(c_id, text):
+            user_turns.append((c_id, text))
+
+        async def on_model(c_id, content, bullets):
+            pass
+
+        watcher = TranscriptWatcher(
+            brain_dir=str(tmp_path),
+            get_active_conv_id=lambda: active[0],
+            is_bot_running=lambda: False,
+            on_user_turn=on_user,
+            on_model_turn=on_model,
+        )
+        watcher.start()
+        await asyncio.sleep(1.2)
+
+        # Flip to conv_b, then back to conv_a: Task A must NOT be replayed a second time
+        active[0] = conv_b
+        await asyncio.sleep(1.2)
+        active[0] = conv_a
+        await asyncio.sleep(1.2)
+        watcher.stop()
+
+        assert user_turns.count((conv_a, "Task A")) == 1
+        assert user_turns.count((conv_b, "Task B")) == 1
+
+    asyncio.run(run_test())
+
+
+def test_transcript_watcher_mark_caught_up_and_resume(tmp_path):
+    async def run_test():
+        conv_id = "conv-catchup-3333"
+        logs_dir = tmp_path / conv_id / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True)
+        transcript_file = logs_dir / "transcript.jsonl"
+        transcript_file.write_text(
+            json.dumps({
+                "step_index": 4,
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "content": "Headless response already sent",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        model_turns = []
+
+        async def on_user(c_id, text):
+            pass
+
+        async def on_model(c_id, content, bullets):
+            model_turns.append(content)
+
+        watcher = TranscriptWatcher(
+            brain_dir=str(tmp_path),
+            get_active_conv_id=lambda: conv_id,
+            is_bot_running=lambda: False,
+            on_user_turn=on_user,
+            on_model_turn=on_model,
+        )
+        await watcher.mark_conv_caught_up(conv_id)
+        watcher.start()
+        await asyncio.sleep(1.2)
+        watcher.stop()
+        assert model_turns == []
+
+        watcher.pause()
+        watcher.resume()
+        assert watcher.is_enabled is True
+        assert watcher._get_state(conv_id)["step_index"] == 4
+
+    asyncio.run(run_test())

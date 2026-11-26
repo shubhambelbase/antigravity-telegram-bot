@@ -167,3 +167,131 @@ def test_runner_log_export_sanitizes_secrets(tmp_path):
     exported = runner.get_session_log_export("sec-session-123")
     assert "9876543210:ABCdefGhIJKlmNoPQRsTUVwxyZ12345678" not in exported
     assert "[REDACTED_TELEGRAM_TOKEN]" in exported
+
+
+def test_runner_execute_prompt_stream_json(monkeypatch, tmp_path):
+    import asyncio
+    import json
+
+    class FakeStream:
+        def __init__(self, lines):
+            self._lines = [l.encode("utf-8") for l in lines]
+
+        async def readline(self):
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+    class FakeProc:
+        def __init__(self, stdout_lines, stderr_lines=None, rc=0):
+            self.pid = 424242
+            self.stdout = FakeStream(stdout_lines)
+            self.stderr = FakeStream(stderr_lines or [])
+            self.returncode = None
+            self._rc = rc
+
+        async def wait(self):
+            self.returncode = self._rc
+            return self._rc
+
+        def kill(self):
+            self._rc = -9
+
+    ndjson_lines = [
+        json.dumps({"event": "init", "conversation_id": "new-conv-uuid-1234", "init": {"cwd": str(tmp_path)}}) + "\n",
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "new-conv-uuid-1234",
+                "step_index": 1,
+                "state": "DONE",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {"name": "run_command", "parameters": {"toolSummary": "Run tests"}},
+            },
+        }) + "\n",
+        json.dumps({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "new-conv-uuid-1234",
+                "step_index": 2,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "All green.\n",
+            },
+        }) + "\n",
+        json.dumps({
+            "event": "result",
+            "result": {
+                "conversation_id": "new-conv-uuid-1234",
+                "status": "SUCCESS",
+                "response": "All green.\n",
+            },
+        }) + "\n",
+    ]
+
+    captured_cmd = []
+
+    async def fake_exec(*cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return FakeProc(ndjson_lines)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    runner = AntigravityRunner(agy_path="agy.exe", default_workspace=str(tmp_path))
+    chunks = []
+    res = asyncio.run(runner.execute_prompt("run tests", on_chunk=lambda c: chunks.append(c)))
+
+    assert "--output-format" in captured_cmd
+    assert "stream-json" in captured_cmd
+    assert "--continue" not in captured_cmd
+    assert res.returncode == 0
+    assert res.conversation_id == "new-conv-uuid-1234"
+    assert runner.conversation_id == "new-conv-uuid-1234"
+    assert res.full_output.strip() == "All green."
+    assert any("Run tests" in c for c in chunks)
+
+
+def test_runner_execute_prompt_handles_error_status(monkeypatch, tmp_path):
+    import asyncio
+    import json
+
+    class FakeStream:
+        def __init__(self, lines):
+            self._lines = [l.encode("utf-8") for l in lines]
+
+        async def readline(self):
+            return self._lines.pop(0) if self._lines else b""
+
+    class FakeProc:
+        def __init__(self):
+            self.pid = 111
+            self.stdout = FakeStream([
+                json.dumps({
+                    "event": "result",
+                    "result": {
+                        "conversation_id": "err-conv",
+                        "status": "ERROR",
+                        "response": "",
+                        "error": "invalid model selection",
+                    },
+                }) + "\n"
+            ])
+            self.stderr = FakeStream([])
+            self.returncode = None
+
+        async def wait(self):
+            self.returncode = 1
+            return 1
+
+        def kill(self):
+            pass
+
+    async def fake_exec(*cmd, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    runner = AntigravityRunner(agy_path="agy.exe", default_workspace=str(tmp_path))
+    res = asyncio.run(runner.execute_prompt("hi"))
+    assert res.error_message == "invalid model selection"
+    assert res.returncode == 1

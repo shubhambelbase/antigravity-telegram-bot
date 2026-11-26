@@ -3,6 +3,10 @@
 Enables injecting prompt text directly into a running interactive agy.exe
 console session via Win32 AttachConsole, VkKeyScanW, MapVirtualKeyW,
 and WriteConsoleInputW APIs with precision hardware scan codes and pacing.
+
+Uses a short-lived isolated worker subprocess for Win32 console attachment
+so the parent bot daemon never detaches its own console via FreeConsole()
+and cannot be killed by GenerateConsoleCtrlEvent.
 """
 
 import ctypes
@@ -11,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -20,65 +25,82 @@ import psutil
 logger = logging.getLogger(__name__)
 
 _console_lock = threading.Lock()
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-kernel32 = ctypes.windll.kernel32
-user32 = ctypes.windll.user32
+if os.name == "nt":
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
 
-# Win32 Constants
-KEY_EVENT = 0x0001
-GENERIC_READ = 0x80000000
-GENERIC_WRITE = 0x40000000
-FILE_SHARE_READ = 0x00000001
-FILE_SHARE_WRITE = 0x00000002
-OPEN_EXISTING = 3
-INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+    # Win32 Constants
+    KEY_EVENT = 0x0001
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+    CREATE_NO_WINDOW = 0x08000000
 
-# Setup function prototypes for 64-bit safety
-kernel32.AttachConsole.argtypes = [wintypes.DWORD]
-kernel32.AttachConsole.restype = wintypes.BOOL
+    # Setup function prototypes for 64-bit safety
+    kernel32.AttachConsole.argtypes = [wintypes.DWORD]
+    kernel32.AttachConsole.restype = wintypes.BOOL
 
-kernel32.FreeConsole.argtypes = []
-kernel32.FreeConsole.restype = wintypes.BOOL
+    kernel32.FreeConsole.argtypes = []
+    kernel32.FreeConsole.restype = wintypes.BOOL
 
-kernel32.GetConsoleWindow.argtypes = []
-kernel32.GetConsoleWindow.restype = wintypes.HWND
+    kernel32.GetConsoleWindow.argtypes = []
+    kernel32.GetConsoleWindow.restype = wintypes.HWND
 
-kernel32.CreateFileW.argtypes = [
-    wintypes.LPCWSTR,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    ctypes.c_void_p,
-    wintypes.DWORD,
-    wintypes.DWORD,
-    wintypes.HANDLE,
-]
-kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
 
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
 
-kernel32.WriteConsoleInputW.argtypes = [
-    wintypes.HANDLE,
-    ctypes.c_void_p,
-    wintypes.DWORD,
-    ctypes.POINTER(wintypes.DWORD),
-]
-kernel32.WriteConsoleInputW.restype = wintypes.BOOL
+    kernel32.WriteConsoleInputW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.WriteConsoleInputW.restype = wintypes.BOOL
 
-kernel32.GenerateConsoleCtrlEvent.argtypes = [wintypes.DWORD, wintypes.DWORD]
-kernel32.GenerateConsoleCtrlEvent.restype = wintypes.BOOL
+    kernel32.GenerateConsoleCtrlEvent.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.GenerateConsoleCtrlEvent.restype = wintypes.BOOL
 
-user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
-user32.VkKeyScanW.restype = ctypes.c_short
+    kernel32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, wintypes.BOOL]
+    kernel32.SetConsoleCtrlHandler.restype = wintypes.BOOL
 
-user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-user32.MapVirtualKeyW.restype = wintypes.UINT
+    user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
+    user32.VkKeyScanW.restype = ctypes.c_short
 
-user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+    user32.MapVirtualKeyW.restype = wintypes.UINT
 
-user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
-user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.SetForegroundWindow.restype = wintypes.BOOL
+
+    user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+    user32.AllowSetForegroundWindow.restype = wintypes.BOOL
+else:
+    kernel32 = None
+    user32 = None
+    KEY_EVENT = 0x0001
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    INVALID_HANDLE_VALUE = -1
+    CREATE_NO_WINDOW = 0
 
 
 class KEY_EVENT_RECORD(ctypes.Structure):
@@ -106,21 +128,29 @@ class INPUT_RECORD(ctypes.Structure):
     ]
 
 
-CONV_DB_RE = re.compile(r"conversations[\\/]([a-f0-9\-]{36})\.db", re.IGNORECASE)
+PRESENCE_LOCK_RE = re.compile(r"presence[\\/]([a-f0-9\-]{36})\.lock", re.IGNORECASE)
+CONV_DB_RE = re.compile(r"(?:conversations|presence)[\\/]([a-f0-9\-]{36})\.(?:db|lock)", re.IGNORECASE)
 
 
 def get_agy_process_conv_id(proc: psutil.Process) -> Optional[str]:
-    """Inspects a process memory maps and open files to identify its active conversation UUID."""
+    """Inspects a process open files (and memory maps fallback) to identify its active conversation UUID."""
     try:
-        for m in proc.memory_maps():
-            match = CONV_DB_RE.search(m.path)
+        open_paths = [f.path for f in proc.open_files()]
+        # Prefer presence/*.lock as the primary indicator of the currently attached interactive session
+        for path in open_paths:
+            match = PRESENCE_LOCK_RE.search(path)
+            if match:
+                return match.group(1)
+        for path in open_paths:
+            match = CONV_DB_RE.search(path)
             if match:
                 return match.group(1)
     except Exception:
         pass
+
     try:
-        for f in proc.open_files():
-            match = CONV_DB_RE.search(f.path)
+        for m in proc.memory_maps():
+            match = CONV_DB_RE.search(m.path)
             if match:
                 return match.group(1)
     except Exception:
@@ -152,36 +182,44 @@ def get_workspace_for_conversation(conv_id: str) -> Optional[str]:
     return None
 
 
+def _paths_match(p1: str, p2: str) -> bool:
+    if not p1 or not p2:
+        return False
+    try:
+        return os.path.samefile(p1, p2)
+    except Exception:
+        return os.path.normcase(os.path.abspath(p1)) == os.path.normcase(os.path.abspath(p2))
+
+
 def list_interactive_agy_processes() -> List[Dict[str, Any]]:
     """Lists all running interactive agy processes with their PID, conversation ID, and workspace."""
     results = []
     VALID_AGY_BINARIES = {"agy.exe", "agy", "antigravity.exe", "antigravity"}
-    for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time", "status"]):
+    for proc in psutil.process_iter(["pid", "name"]):
         try:
             name = (proc.info.get("name") or "").lower()
-            cmdline = proc.info.get("cmdline") or []
+            if name not in VALID_AGY_BINARIES:
+                continue
 
-            is_agy = name in VALID_AGY_BINARIES
-            if not is_agy and cmdline:
-                first_arg = os.path.basename(cmdline[0]).lower()
-                is_agy = first_arg in VALID_AGY_BINARIES
+            cmdline = proc.cmdline() or []
+            # Exclude headless print mode, acp stdio server, remote-control daemon, and help invocations
+            if any(arg in ["-p", "--print", "--prompt", "-h", "--help", "acp", "remote-control"] for arg in cmdline):
+                continue
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                continue
 
-            if is_agy:
-                # Exclude headless print mode and help invocations
-                if not any(arg in ["-p", "--print", "-h", "--help"] for arg in cmdline):
-                    if proc.info.get("status") != psutil.STATUS_ZOMBIE:
-                        try:
-                            cwd = proc.cwd()
-                        except Exception:
-                            cwd = ""
-                        conv_id = get_agy_process_conv_id(proc)
-                        results.append({
-                            "pid": proc.info["pid"],
-                            "proc": proc,
-                            "cwd": cwd,
-                            "conv_id": conv_id,
-                            "create_time": proc.info.get("create_time", 0.0),
-                        })
+            try:
+                cwd = proc.cwd()
+            except Exception:
+                cwd = ""
+            conv_id = get_agy_process_conv_id(proc)
+            results.append({
+                "pid": proc.info["pid"],
+                "proc": proc,
+                "cwd": cwd,
+                "conv_id": conv_id,
+                "create_time": proc.create_time(),
+            })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 
@@ -196,11 +234,13 @@ def find_interactive_agy_pid(
     """Finds the PID of the interactive agy.exe process matching the requested session or workspace.
 
     1. If conv_id is provided:
-       - Matches process whose open memory map contains conversations/<conv_id>.db.
-       - If no direct memory map match, matches process whose cwd matches the workspace of conv_id.
-       - Returns None if conv_id was explicitly requested but no matching interactive terminal is open.
-    2. If workspace is provided:
-       - Matches process whose cwd matches workspace.
+       - Matches process whose open files/maps match conv_id.
+       - If no direct match, matches an interactive process in conv_id's workspace ONLY if that
+         process does not already hold a different conversation ID.
+       - Returns None if no matching interactive terminal is open (prevents cross-session hijacking).
+    2. If workspace is provided (without conv_id):
+       - Matches process whose cwd matches workspace; returns None if none match (never hijacks
+         another workspace's terminal).
     3. If neither is provided:
        - Returns the most recently launched candidate.
     """
@@ -212,42 +252,32 @@ def find_interactive_agy_pid(
     # Step 1: Match by conversation ID if requested
     if conv_id:
         clean_conv = conv_id.strip()
-        # Direct session database match
         for cand in candidates:
-            if cand["conv_id"] and (cand["conv_id"] == clean_conv or cand["conv_id"].startswith(clean_conv)):
+            c_id = cand.get("conv_id")
+            if c_id and (c_id == clean_conv or c_id.startswith(clean_conv)):
                 return cand["pid"]
 
-        # Fallback to workspace of this conversation
+        # Fallback to workspace ONLY if candidate has no conflicting conversation ID
         conv_ws = get_workspace_for_conversation(clean_conv)
         if conv_ws:
             for cand in candidates:
-                cand_cwd = cand["cwd"]
-                if cand_cwd:
-                    try:
-                        if os.path.samefile(cand_cwd, conv_ws):
-                            return cand["pid"]
-                    except Exception:
-                        if cand_cwd.lower() == conv_ws.lower():
-                            return cand["pid"]
+                c_id = cand.get("conv_id")
+                if c_id and c_id != clean_conv and not c_id.startswith(clean_conv):
+                    continue
+                if _paths_match(cand.get("cwd", ""), conv_ws):
+                    return cand["pid"]
 
-        # An explicit conversation was requested, but it is NOT running in any interactive desktop window!
-        # Return None to prevent hijacking an unrelated desktop window.
         return None
 
-    # Step 2: Match by workspace if provided
+    # Step 2: Strict workspace match when workspace is specified
     if workspace:
         clean_ws = os.path.abspath(workspace)
         for cand in candidates:
-            cand_cwd = cand["cwd"]
-            if cand_cwd:
-                try:
-                    if os.path.samefile(cand_cwd, clean_ws):
-                        return cand["pid"]
-                except Exception:
-                    if cand_cwd.lower() == clean_ws.lower():
-                        return cand["pid"]
+            if _paths_match(cand.get("cwd", ""), clean_ws):
+                return cand["pid"]
+        return None
 
-    # Step 3: Default to most recently launched candidate
+    # Step 3: Default to most recently launched candidate when unfiltered
     return candidates[0]["pid"]
 
 
@@ -257,7 +287,6 @@ def _get_input_records_for_char(ch: str):
     Returns a list of (rec_down, rec_up) tuples.
     """
     if ord(ch) > 0xFFFF:
-        # Non-BMP character (e.g. emoji like '\U0001f517' or link symbols)
         utf16_bytes = ch.encode("utf-16-le")
         wchar_chars = [
             chr(int.from_bytes(utf16_bytes[0:2], "little")),
@@ -299,11 +328,11 @@ def _get_input_records_for_char(ch: str):
         ctrl_state = 0
     else:
         try:
-            scan_res = user32.VkKeyScanW(ch)
+            scan_res = user32.VkKeyScanW(ch) if user32 else -1
         except Exception:
             scan_res = -1
 
-        if scan_res != -1:
+        if scan_res != -1 and user32:
             vk = scan_res & 0xFF
             shift_state = (scan_res >> 8) & 0xFF
             ctrl_state = 0
@@ -319,7 +348,6 @@ def _get_input_records_for_char(ch: str):
             scan = 0
             ctrl_state = 0
 
-    # Key Down
     rec_down = INPUT_RECORD()
     rec_down.EventType = KEY_EVENT
     rec_down.Event.KeyEvent.bKeyDown = True
@@ -329,7 +357,6 @@ def _get_input_records_for_char(ch: str):
     rec_down.Event.KeyEvent.wVirtualScanCode = scan
     rec_down.Event.KeyEvent.dwControlKeyState = ctrl_state
 
-    # Key Up
     rec_up = INPUT_RECORD()
     rec_up.EventType = KEY_EVENT
     rec_up.Event.KeyEvent.bKeyDown = False
@@ -348,34 +375,18 @@ def _build_char_records(ch: str):
     return pairs[0]
 
 
-def inject_text_to_agy(
-    text: str,
-    pid: Optional[int] = None,
-    conv_id: Optional[str] = None,
-    workspace: Optional[str] = None,
-) -> bool:
-    """Injects text + Enter into the interactive agy console window with robust pacing.
-    Guarantees that console is detached BEFORE any logging so bot logs never leak into target terminal.
-    """
-    target_pid = pid or find_interactive_agy_pid(conv_id=conv_id, workspace=workspace)
-    if not target_pid:
-        logger.warning("No interactive agy process found.")
-        return False
+def _in_process_inject_text(clean_text: str, target_pid: int, submit: bool = True) -> tuple[bool, Optional[str], int]:
+    """Executes raw Win32 AttachConsole + WriteConsoleInputW for text. Intended to run in worker subprocess."""
+    if not kernel32 or not user32:
+        return False, "Console injection is only supported on Windows.", 0
 
-    # Normalize prompt: convert any internal newlines to spaces so Bubbletea stays single-line
-    clean_text = text.replace("\r\n", " ").replace("\n", " ").strip()
-    if not clean_text:
-        return False
-
-    # Pre-build all input records in memory before attaching to console
     input_records = []
     try:
         for ch in clean_text:
             for rec_down, rec_up in _get_input_records_for_char(ch):
                 input_records.append((rec_down, rec_up))
     except Exception as e:
-        logger.error(f"Failed to prepare input records for prompt: {e}")
-        return False
+        return False, f"Failed to prepare input records for prompt: {e}", 0
 
     success = False
     err_message = None
@@ -385,12 +396,10 @@ def inject_text_to_agy(
         kernel32.FreeConsole()
         if not kernel32.AttachConsole(target_pid):
             err = kernel32.GetLastError()
-            logger.warning(f"Failed to AttachConsole to PID {target_pid}: error code {err}")
-            return False
+            return False, f"Failed to AttachConsole to PID {target_pid}: error code {err}", 0
 
         h_conin = None
         try:
-            # Focus/wake the console window if available
             hwnd = kernel32.GetConsoleWindow()
             if hwnd:
                 try:
@@ -417,46 +426,50 @@ def inject_text_to_agy(
                 for rec_down, rec_up in input_records:
                     pair = pair_type(rec_down, rec_up)
                     ok = kernel32.WriteConsoleInputW(h_conin, pair, 2, ctypes.byref(written_count))
-                    if ok:
+                    if ok and written_count.value == 2:
                         total_chars_written += 1
+                    else:
+                        err_message = f"WriteConsoleInputW wrote {written_count.value}/2 records."
+                        break
                     time.sleep(0.003)
 
-                if total_chars_written > 0:
-                    # Dynamically pace pre-Enter delay so Bubbletea finished drawing textarea
-                    pre_enter_delay = max(0.12, len(clean_text) * 0.001)
-                    time.sleep(pre_enter_delay)
+                if total_chars_written == len(input_records) and total_chars_written > 0:
+                    if submit:
+                        pre_enter_delay = max(0.12, min(1.0, len(clean_text) * 0.001))
+                        time.sleep(pre_enter_delay)
 
-                    # Send Enter KeyDown with hardware scan code 0x1C (VK_RETURN)
-                    ret_down = INPUT_RECORD()
-                    ret_down.EventType = KEY_EVENT
-                    ret_down.Event.KeyEvent.bKeyDown = True
-                    ret_down.Event.KeyEvent.wRepeatCount = 1
-                    ret_down.Event.KeyEvent.UnicodeChar = "\r"
-                    ret_down.Event.KeyEvent.wVirtualKeyCode = 0x0D
-                    ret_down.Event.KeyEvent.wVirtualScanCode = 0x1C
-                    ret_down.Event.KeyEvent.dwControlKeyState = 0
+                        ret_down = INPUT_RECORD()
+                        ret_down.EventType = KEY_EVENT
+                        ret_down.Event.KeyEvent.bKeyDown = True
+                        ret_down.Event.KeyEvent.wRepeatCount = 1
+                        ret_down.Event.KeyEvent.UnicodeChar = "\r"
+                        ret_down.Event.KeyEvent.wVirtualKeyCode = 0x0D
+                        ret_down.Event.KeyEvent.wVirtualScanCode = 0x1C
+                        ret_down.Event.KeyEvent.dwControlKeyState = 0
 
-                    single_type = INPUT_RECORD * 1
-                    arr_ret_down = single_type(ret_down)
-                    kernel32.WriteConsoleInputW(h_conin, arr_ret_down, 1, ctypes.byref(written_count))
+                        single_type = INPUT_RECORD * 1
+                        arr_ret_down = single_type(ret_down)
+                        ok_d = kernel32.WriteConsoleInputW(h_conin, arr_ret_down, 1, ctypes.byref(written_count))
+                        time.sleep(0.04)
 
-                    time.sleep(0.04)
+                        ret_up = INPUT_RECORD()
+                        ret_up.EventType = KEY_EVENT
+                        ret_up.Event.KeyEvent.bKeyDown = False
+                        ret_up.Event.KeyEvent.wRepeatCount = 1
+                        ret_up.Event.KeyEvent.UnicodeChar = "\r"
+                        ret_up.Event.KeyEvent.wVirtualKeyCode = 0x0D
+                        ret_up.Event.KeyEvent.wVirtualScanCode = 0x1C
+                        ret_up.Event.KeyEvent.dwControlKeyState = 0
 
-                    # Send Enter KeyUp
-                    ret_up = INPUT_RECORD()
-                    ret_up.EventType = KEY_EVENT
-                    ret_up.Event.KeyEvent.bKeyDown = False
-                    ret_up.Event.KeyEvent.wRepeatCount = 1
-                    ret_up.Event.KeyEvent.UnicodeChar = "\r"
-                    ret_up.Event.KeyEvent.wVirtualKeyCode = 0x0D
-                    ret_up.Event.KeyEvent.wVirtualScanCode = 0x1C
-                    ret_up.Event.KeyEvent.dwControlKeyState = 0
-
-                    arr_ret_up = single_type(ret_up)
-                    kernel32.WriteConsoleInputW(h_conin, arr_ret_up, 1, ctypes.byref(written_count))
-                    time.sleep(0.04)
-                    success = True
-                else:
+                        arr_ret_up = single_type(ret_up)
+                        ok_u = kernel32.WriteConsoleInputW(h_conin, arr_ret_up, 1, ctypes.byref(written_count))
+                        time.sleep(0.04)
+                        success = bool(ok_d and ok_u)
+                        if not success:
+                            err_message = "Failed writing Enter key event to CONIN$."
+                    else:
+                        success = True
+                elif not err_message:
                     err_message = "Zero characters were written to CONIN$."
         except Exception as e:
             err_message = f"Exception during console injection: {e}"
@@ -466,17 +479,193 @@ def inject_text_to_agy(
                     kernel32.CloseHandle(h_conin)
                 except Exception:
                     pass
-            # CRITICAL: Detach console BEFORE any logging to prevent log leak into target terminal
             kernel32.FreeConsole()
 
-    # Log results safely outside of the attached console
-    if success:
-        logger.info(f"Successfully injected {total_chars_written} chars + Enter into PID {target_pid}")
-        return True
-    else:
-        if err_message:
-            logger.warning(err_message)
+    return success, err_message, total_chars_written
+
+
+VK_MAP = {
+    "enter": (0x0D, 0x1C, "\r", 0),
+    "return": (0x0D, 0x1C, "\r", 0),
+    "up": (0x26, 0x48, "\x00", 0x0100),       # ENHANCED_KEY
+    "down": (0x28, 0x50, "\x00", 0x0100),     # ENHANCED_KEY
+    "left": (0x25, 0x4B, "\x00", 0x0100),     # ENHANCED_KEY
+    "right": (0x27, 0x4D, "\x00", 0x0100),    # ENHANCED_KEY
+    "space": (0x20, 0x39, " ", 0),
+    "backspace": (0x08, 0x0E, "\b", 0),
+    "tab": (0x09, 0x0F, "\t", 0),
+    "escape": (0x1B, 0x01, "\x1B", 0),
+    "ctrl_c": (0x43, 0x2E, "\x03", 0x0008),   # LEFT_CTRL_PRESSED
+}
+
+
+def _in_process_inject_special_key(name: str, target_pid: int) -> tuple[bool, Optional[str]]:
+    """Executes Win32 AttachConsole + special key injection. Intended to run in worker subprocess."""
+    if not kernel32:
+        return False, "Console injection is only supported on Windows."
+
+    if name in ("yes", "y"):
+        ok, err, _ = _in_process_inject_text("y", target_pid, submit=True)
+        return ok, err
+    if name in ("no", "n"):
+        ok, err, _ = _in_process_inject_text("n", target_pid, submit=True)
+        return ok, err
+    if name in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+        # Menu selection numbers in TUIs often act immediately without needing a trailing Enter
+        ok, err, _ = _in_process_inject_text(name, target_pid, submit=False)
+        return ok, err
+
+    if name not in VK_MAP:
+        return False, f"Unsupported special key: {name}"
+
+    vk, scan, uchar, ctrl_state = VK_MAP[name]
+    success = False
+    err_message = None
+
+    with _console_lock:
+        kernel32.FreeConsole()
+        if not kernel32.AttachConsole(target_pid):
+            err = kernel32.GetLastError()
+            return False, f"Failed to AttachConsole to PID {target_pid}: error code {err}"
+
+        h_conin = None
+        ctrl_ignored = False
+        try:
+            if name == "ctrl_c":
+                # Shield this worker process from CTRL_C_EVENT before signalling the target console
+                ctrl_ignored = bool(kernel32.SetConsoleCtrlHandler(None, True))
+
+            h_conin = kernel32.CreateFileW(
+                "CONIN$",
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                0,
+                None,
+            )
+            if h_conin != INVALID_HANDLE_VALUE and h_conin:
+                written = wintypes.DWORD()
+                single_type = INPUT_RECORD * 1
+
+                rec_down = INPUT_RECORD()
+                rec_down.EventType = KEY_EVENT
+                rec_down.Event.KeyEvent.bKeyDown = True
+                rec_down.Event.KeyEvent.wRepeatCount = 1
+                rec_down.Event.KeyEvent.UnicodeChar = uchar
+                rec_down.Event.KeyEvent.wVirtualKeyCode = vk
+                rec_down.Event.KeyEvent.wVirtualScanCode = scan
+                rec_down.Event.KeyEvent.dwControlKeyState = ctrl_state
+                arr_down = single_type(rec_down)
+                ok_d = kernel32.WriteConsoleInputW(h_conin, arr_down, 1, ctypes.byref(written))
+
+                time.sleep(0.02)
+
+                rec_up = INPUT_RECORD()
+                rec_up.EventType = KEY_EVENT
+                rec_up.Event.KeyEvent.bKeyDown = False
+                rec_up.Event.KeyEvent.wRepeatCount = 1
+                rec_up.Event.KeyEvent.UnicodeChar = uchar
+                rec_up.Event.KeyEvent.wVirtualKeyCode = vk
+                rec_up.Event.KeyEvent.wVirtualScanCode = scan
+                rec_up.Event.KeyEvent.dwControlKeyState = ctrl_state
+                arr_up = single_type(rec_up)
+                ok_u = kernel32.WriteConsoleInputW(h_conin, arr_up, 1, ctypes.byref(written))
+
+                time.sleep(0.02)
+                success = bool(ok_d and ok_u)
+
+                if name == "ctrl_c":
+                    try:
+                        sent = bool(kernel32.GenerateConsoleCtrlEvent(0, target_pid))
+                        if not sent:
+                            kernel32.GenerateConsoleCtrlEvent(0, 0)
+                    except Exception:
+                        pass
+            else:
+                err_message = "Failed to open CONIN$ for special key writing."
+        except Exception as e:
+            err_message = f"Error injecting special key: {e}"
+        finally:
+            if h_conin and h_conin != INVALID_HANDLE_VALUE:
+                try:
+                    kernel32.CloseHandle(h_conin)
+                except Exception:
+                    pass
+            kernel32.FreeConsole()
+            if ctrl_ignored:
+                try:
+                    kernel32.SetConsoleCtrlHandler(None, False)
+                except Exception:
+                    pass
+
+    return success, err_message
+
+
+def _run_injection_worker(payload: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
+    """Runs console injection in an isolated short-lived subprocess so the bot keeps its own console."""
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{_PROJECT_ROOT}{os.pathsep}{existing_pp}" if existing_pp else _PROJECT_ROOT
+
+    creationflags = CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "execution.console_injector", "--worker"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=_PROJECT_ROOT,
+            env=env,
+            creationflags=creationflags,
+        )
+        out = (proc.stdout or "").strip()
+        if out:
+            last_line = out.splitlines()[-1]
+            return json.loads(last_line)
+        return {"ok": False, "error": proc.stderr.strip() or f"Worker exited with {proc.returncode}", "chars": 0}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Console injection worker timed out.", "chars": 0}
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to run console worker: {e}", "chars": 0}
+
+
+def inject_text_to_agy(
+    text: str,
+    pid: Optional[int] = None,
+    conv_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    submit: bool = True,
+) -> bool:
+    """Injects text (+ Enter if submit=True) into the interactive agy console window safely."""
+    target_pid = pid or find_interactive_agy_pid(conv_id=conv_id, workspace=workspace)
+    if not target_pid:
+        logger.warning("No interactive agy process found.")
         return False
+
+    clean_text = text.replace("\r\n", " ").replace("\n", " ").strip()
+    if not clean_text:
+        return False
+
+    if not psutil.pid_exists(target_pid):
+        logger.warning(f"Failed to AttachConsole to PID {target_pid}: error code 87")
+        return False
+
+    timeout = max(15.0, len(clean_text) * 0.01 + 10.0)
+    res = _run_injection_worker(
+        {"mode": "text", "pid": target_pid, "text": clean_text, "submit": submit},
+        timeout=timeout,
+    )
+    if res.get("ok"):
+        chars = res.get("chars", len(clean_text))
+        suffix = " + Enter" if submit else ""
+        logger.info(f"Successfully injected {chars} chars{suffix} into PID {target_pid}")
+        return True
+
+    if res.get("error"):
+        logger.warning(res["error"])
+    return False
 
 
 def inject_special_key(
@@ -492,117 +681,27 @@ def inject_special_key(
         return False
 
     name = key_name.strip().lower()
-
-    if name in ("yes", "y"):
-        return inject_text_to_agy("y", pid=target_pid)
-    elif name in ("no", "n"):
-        return inject_text_to_agy("n", pid=target_pid)
-    elif name in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
-        return inject_text_to_agy(name, pid=target_pid)
-
-    # Low-level virtual key codes for navigation & control
-    VK_MAP = {
-        "enter": (0x0D, 0x1C, "\r", 0),
-        "return": (0x0D, 0x1C, "\r", 0),
-        "up": (0x26, 0x48, "\x00", 0x0100),       # ENHANCED_KEY
-        "down": (0x28, 0x50, "\x00", 0x0100),     # ENHANCED_KEY
-        "left": (0x25, 0x4B, "\x00", 0x0100),     # ENHANCED_KEY
-        "right": (0x27, 0x4D, "\x00", 0x0100),    # ENHANCED_KEY
-        "space": (0x20, 0x39, " ", 0),
-        "backspace": (0x08, 0x0E, "\b", 0),
-        "tab": (0x09, 0x0F, "\t", 0),
-        "escape": (0x1B, 0x01, "\x1B", 0),
-        "ctrl_c": (0x43, 0x2E, "\x03", 0x0008),   # LEFT_CTRL_PRESSED
-    }
-
-    if name not in VK_MAP:
+    valid_names = set(VK_MAP.keys()) | {"yes", "y", "no", "n", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
+    if name not in valid_names:
         logger.warning(f"Unsupported special key: {name}")
         return False
 
-    vk, scan, uchar, ctrl_state = VK_MAP[name]
-    success = False
-    err_message = None
+    if not psutil.pid_exists(target_pid):
+        logger.warning(f"Failed to AttachConsole to PID {target_pid}: error code 87")
+        return False
 
-    with _console_lock:
-        kernel32.FreeConsole()
-        if not kernel32.AttachConsole(target_pid):
-            logger.warning(f"Failed to AttachConsole to PID {target_pid}")
-            return False
-
-        h_conin = None
-        try:
-            h_conin = kernel32.CreateFileW(
-                "CONIN$",
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                0,
-                None,
-            )
-            if h_conin != INVALID_HANDLE_VALUE and h_conin:
-                written = wintypes.DWORD()
-                single_type = INPUT_RECORD * 1
-
-                # KeyDown
-                rec_down = INPUT_RECORD()
-                rec_down.EventType = KEY_EVENT
-                rec_down.Event.KeyEvent.bKeyDown = True
-                rec_down.Event.KeyEvent.wRepeatCount = 1
-                rec_down.Event.KeyEvent.UnicodeChar = uchar
-                rec_down.Event.KeyEvent.wVirtualKeyCode = vk
-                rec_down.Event.KeyEvent.wVirtualScanCode = scan
-                rec_down.Event.KeyEvent.dwControlKeyState = ctrl_state
-                arr_down = single_type(rec_down)
-                kernel32.WriteConsoleInputW(h_conin, arr_down, 1, ctypes.byref(written))
-
-                time.sleep(0.02)
-
-                # KeyUp
-                rec_up = INPUT_RECORD()
-                rec_up.EventType = KEY_EVENT
-                rec_up.Event.KeyEvent.bKeyDown = False
-                rec_up.Event.KeyEvent.wRepeatCount = 1
-                rec_up.Event.KeyEvent.UnicodeChar = uchar
-                rec_up.Event.KeyEvent.wVirtualKeyCode = vk
-                rec_up.Event.KeyEvent.wVirtualScanCode = scan
-                rec_up.Event.KeyEvent.dwControlKeyState = ctrl_state
-                arr_up = single_type(rec_up)
-                kernel32.WriteConsoleInputW(h_conin, arr_up, 1, ctypes.byref(written))
-
-                time.sleep(0.02)
-                success = True
-
-                if name == "ctrl_c":
-                    try:
-                        # Send CTRL_C_EVENT (0) to process group
-                        kernel32.GenerateConsoleCtrlEvent(0, 0)
-                    except Exception:
-                        pass
-            else:
-                err_message = "Failed to open CONIN$ for special key writing."
-        except Exception as e:
-            err_message = f"Error injecting special key: {e}"
-        finally:
-            if h_conin and h_conin != INVALID_HANDLE_VALUE:
-                try:
-                    kernel32.CloseHandle(h_conin)
-                except Exception:
-                    pass
-            # Detach console BEFORE any logging
-            kernel32.FreeConsole()
-
-    if success:
+    res = _run_injection_worker({"mode": "key", "pid": target_pid, "key": name}, timeout=10.0)
+    if res.get("ok"):
         logger.info(f"Injected special key '{name}' to PID {target_pid}")
         return True
-    else:
-        if err_message:
-            logger.warning(err_message)
-        return False
+
+    if res.get("error"):
+        logger.warning(res["error"])
+    return False
 
 
 def is_agy_process_busy(pid: Optional[int] = None) -> bool:
-    """Checks if an agy process or its child processes are actively executing tools (compilers, git, python, etc.)."""
+    """Checks if an agy process or its child processes are actively executing non-MCP tools."""
     target_pid = pid or find_interactive_agy_pid()
     if not target_pid:
         return False
@@ -612,9 +711,45 @@ def is_agy_process_busy(pid: Optional[int] = None) -> bool:
             if not child.is_running():
                 continue
             cname = child.name().lower()
+            try:
+                cmd = " ".join(child.cmdline() or []).lower()
+            except Exception:
+                cmd = ""
+            # Ignore persistent MCP server sidecars launched by agy
+            if "mcp_server" in cmd or "mcp" in cmd and ("python" in cname or "uv" in cname):
+                continue
             if any(tool in cname for tool in ("python", "git", "cargo", "npm", "node", "pytest", "bash", "powershell", "cmd", "gradle", "mvn")):
                 return True
     except Exception:
         pass
     return False
 
+
+def _worker_main() -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"Invalid worker payload: {e}", "chars": 0}))
+        return 1
+
+    mode = payload.get("mode")
+    pid = int(payload.get("pid") or 0)
+    if mode == "text":
+        ok, err, chars = _in_process_inject_text(
+            str(payload.get("text", "")),
+            pid,
+            submit=bool(payload.get("submit", True)),
+        )
+        print(json.dumps({"ok": ok, "error": err, "chars": chars}))
+        return 0 if ok else 1
+    if mode == "key":
+        ok, err = _in_process_inject_special_key(str(payload.get("key", "")), pid)
+        print(json.dumps({"ok": ok, "error": err, "chars": 0}))
+        return 0 if ok else 1
+
+    print(json.dumps({"ok": False, "error": f"Unknown mode: {mode}", "chars": 0}))
+    return 1
+
+
+if __name__ == "__main__" and "--worker" in sys.argv:
+    sys.exit(_worker_main())

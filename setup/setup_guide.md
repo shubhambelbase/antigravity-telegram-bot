@@ -24,16 +24,16 @@ A step-by-step guide to installing, configuring, and operating the autonomous **
 Anyone can download or clone this project onto a brand-new Windows PC with **zero manual configuration**:
 * **No Python pre-installation required:** If Python 3.10+ is missing, the installer automatically downloads and installs the official Python 3.12 runtime.
 * **No system PATH pollution:** Dependencies are installed into an isolated local `.venv` inside the project folder.
-* **Auto-healing launcher:** If a user double-clicks `run_bot.bat` before installing, it automatically runs the installer first.
+* **Silent background startup:** Supports windowless `pythonw.exe` execution via `setup/start_bot_silent.vbs` and `/autostart`.
 
 ---
 
-## Prerequisites (Handled Automatically by Installer)
+## Prerequisites
 
 1. **Operating System:** Windows 10 or 11 (64-bit).
-2. **Python:** Version 3.10 or higher *(automatically installed by `install.bat` if missing)*.
+2. **Python:** Version 3.10 or higher (`python --version`).
 3. **Google Antigravity CLI (`agy`):** Installed and authenticated on your machine.
-   - Run `agy --help` in PowerShell or CMD to verify.
+   - Run `agy --help` in PowerShell to verify.
 4. **Telegram Account:** Any official Telegram mobile or desktop client.
 
 ---
@@ -49,40 +49,33 @@ Anyone can download or clone this project onto a brand-new Windows PC with **zer
 
 ---
 
-## Step 2: Clone or Download the Project
+## Step 2: Clone & Install in PowerShell
 
-Clone or extract the repository into any directory:
 ```powershell
-git clone https://github.com/your-username/antigravity-telegram-bot.git
+git clone https://github.com/shubhambelbase/antigravity-telegram-bot.git
 cd antigravity-telegram-bot
+
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
----
-
-## Step 3: Run the Automated 1-Click Installer
-
-Double-click **`install.bat`** in the project root (or run `setup\install.bat`):
+Verify your environment with pytest:
 ```powershell
-install.bat
+.\.venv\Scripts\python.exe -m pytest tests/ -v
 ```
-
-This automated installer will:
-1. Verify Python 3.10+ (or install Python 3.12 automatically via winget if missing).
-2. Create an isolated virtual environment (`.venv`).
-3. Upgrade pip and install all dependencies (`python-telegram-bot`, `pillow`, `psutil`, `pytest`, `python-dotenv`).
-4. Execute the automated verification suite (**39 unit tests**) to verify system compatibility.
-5. Create your `.env` configuration file from `.env.example`.
 
 ---
 
-## Step 4: Configure Your `.env` File
+## Step 3: Configure Your `.env` File
 
-Open the `.env` file in Notepad:
+Open `.env` in Notepad (`notepad .env`):
 ```env
 # 1. Paste your bot token from @BotFather
 TELEGRAM_BOT_TOKEN=123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ
 
-# 2. Leave this blank for now! (Auto-pairing will set this in Step 5)
+# 2. Leave this blank for now! (Auto-pairing will set this in Step 4)
 ALLOWED_TELEGRAM_USER_IDS=
 
 # 3. Default workspace folder for agent tasks
@@ -94,19 +87,23 @@ AGY_PATH=
 
 ---
 
-## Step 5: Launch the Bot & Pair Your Account
+## Step 4: Launch the Bot & Pair Your Account
 
-1. Double-click **`run_bot.bat`** in the project root.
+1. Run the bot in PowerShell:
+   ```powershell
+   .\.venv\Scripts\python.exe -m execution.telegram_bot
+   ```
+   *(Or launch silently without a console window: `wscript.exe .\setup\start_bot_silent.vbs`)*
 2. Open Telegram on your phone or PC and open your bot.
 3. Click **Start** (or send `/start`).
-4. The bot will detect that it is unbonded and enter **Setup Mode**:
+4. The bot will enter **Setup Mode** and generate a local 6-digit pairing PIN (printed to the bot console, `logs/bot.log`, and `.tmp/pairing_code.txt`):
    ```text
    🔒 Antigravity Controller (Setup Mode)
    Your Telegram User ID is: 123456789
-   To pair and lock it to your account, send:
-   /claim 123456789
+   This bot is unclaimed. Check your local PC console, logs/bot.log, or .tmp/pairing_code.txt for the 6-digit pairing PIN, then send:
+   /claim <PIN>
    ```
-5. Send `/claim <YOUR_USER_ID>`.
+5. Send `/claim <PIN>` from your Telegram client.
 6. The bot automatically updates `.env` with your ID and locks down access so **only you** can control your machine.
 
 ---
@@ -178,13 +175,14 @@ You can change and manage workspaces directly in Telegram:
 
 The bot can automatically launch in the background whenever you boot or log in to your Windows laptop:
 
-### Option 1: 1-Click Batch Script
-- **To Enable:** Double-click `setup\enable_autostart.bat`.
-- **To Disable:** Double-click `setup\disable_autostart.bat`.
-
-### Option 2: Directly from Telegram
+### Option 1: Directly from Telegram
 - Send `/autostart` to toggle auto-start on/off.
 - Or tap `[ 🚀 Enable Auto-Start ]` on your `/status` card.
+
+### Option 2: PowerShell
+```powershell
+.\.venv\Scripts\python.exe -c "from execution.autostart import enable_autostart; enable_autostart()"
+```
 
 ### How It Works Under the Hood
 1. A shortcut is registered in your personal Windows Startup directory (`shell:startup`).
@@ -199,15 +197,3 @@ The bot can automatically launch in the background whenever you boot or log in t
 * **Zero Open Ports:** Uses Telegram Long Polling (`getUpdates`); no open inbound ports or port-forwarding required.
 * **Whitelist Enforcement:** Every update is checked against `ALLOWED_TELEGRAM_USER_IDS`. Unauthorized requests are discarded and logged.
 * **Secret Protection:** `.env` and `.bot.pid` are strictly excluded from version control via `.gitignore`.
-
----
-
-## Pushing to GitHub (`setup/push_to_github.bat`)
-
-To push this project to your GitHub account:
-1. Double-click `setup\push_to_github.bat`.
-2. The script will:
-   - Run a secret audit to ensure `.env` and credentials are never pushed.
-   - Run the 46 automated unit tests.
-   - If GitHub CLI (`gh`) is logged in, offer to automatically create a repository for you (public or private).
-   - If entering a URL manually, connect remote `origin` and push branch `main`.

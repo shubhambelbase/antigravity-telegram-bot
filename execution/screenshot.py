@@ -10,27 +10,87 @@ import io
 import logging
 import os
 import subprocess
-from typing import Optional, Tuple
-from PIL import Image, ImageDraw
+import textwrap
+from typing import Any, Optional, Tuple
+from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
+_desktop_station_attached = False
 
-def ensure_desktop_access() -> bool:
-    """Attaches current process and thread to WinSta0 (interactive window station) and default desktop."""
+
+def _get_current_desktop_name() -> Optional[str]:
     if os.name != "nt":
-        return False
+        return None
     try:
         import ctypes
+        from ctypes import wintypes
+
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.GetThreadDesktop.argtypes = [wintypes.DWORD]
+        user32.GetThreadDesktop.restype = wintypes.HANDLE
+        user32.GetUserObjectInformationW.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+        ]
+        user32.GetUserObjectInformationW.restype = wintypes.BOOL
+
+        hdesk = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+        if not hdesk:
+            return None
+        buf = ctypes.create_unicode_buffer(128)
+        needed = wintypes.DWORD()
+        # UOI_NAME = 2
+        if user32.GetUserObjectInformationW(hdesk, 2, buf, ctypes.sizeof(buf), ctypes.byref(needed)):
+            return buf.value
+    except Exception:
+        pass
+    return None
+
+
+def ensure_desktop_access() -> bool:
+    """Attaches current process and thread to WinSta0 (interactive window station) and default desktop safely."""
+    global _desktop_station_attached
+    if os.name != "nt":
+        return False
+    if _desktop_station_attached and (_get_current_desktop_name() or "").lower() == "default":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.OpenWindowStationW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenWindowStationW.restype = wintypes.HANDLE
+        user32.SetProcessWindowStation.argtypes = [wintypes.HANDLE]
+        user32.SetProcessWindowStation.restype = wintypes.BOOL
+        user32.CloseWindowStation.argtypes = [wintypes.HANDLE]
+        user32.CloseWindowStation.restype = wintypes.BOOL
+
+        user32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenDesktopW.restype = wintypes.HANDLE
+        user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+        user32.SetThreadDesktop.restype = wintypes.BOOL
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        user32.CloseDesktop.restype = wintypes.BOOL
+
         # WINSTA_ALL_ACCESS = 0x0000037F
         hwinsta = user32.OpenWindowStationW("WinSta0", False, 0x0000037F)
         if hwinsta:
-            user32.SetProcessWindowStation(hwinsta)
+            try:
+                user32.SetProcessWindowStation(hwinsta)
+            finally:
+                user32.CloseWindowStation(hwinsta)
+
         # DESKTOP_ALL_ACCESS = 0x01FF
         hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
         if hdesk:
-            user32.SetThreadDesktop(hdesk)
+            try:
+                user32.SetThreadDesktop(hdesk)
+            finally:
+                user32.CloseDesktop(hdesk)
+
+        _desktop_station_attached = True
         return True
     except Exception as e:
         logger.debug(f"Failed to attach to WinSta0 desktop: {e}")
@@ -42,18 +102,16 @@ def is_blank_or_invalid_image(img: Optional[Image.Image]) -> bool:
     if img is None or img.width <= 1 or img.height <= 1:
         return True
 
-    # Check for complete transparency
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         try:
             extrema = img.getextrema()
             if img.mode == "RGBA":
                 alpha_extrema = extrema[3]
-                if alpha_extrema[1] == 0:  # Max alpha is 0 => completely transparent
+                if alpha_extrema[1] == 0:
                     return True
         except Exception:
             pass
 
-    # Check for solid single-color images (e.g. solid white or solid black)
     try:
         rgb = img.convert("RGB")
         colors = rgb.getcolors(maxcolors=2)
@@ -72,17 +130,16 @@ def capture_win32_gdi() -> Optional[Image.Image]:
     try:
         import ctypes
         from ctypes import wintypes
+
         user32 = ctypes.windll.user32
         gdi32 = ctypes.windll.gdi32
 
-        # Attach to interactive desktop station
         ensure_desktop_access()
 
-        # Query virtual screen coordinates
-        left = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
-        top = user32.GetSystemMetrics(77)   # SM_YVIRTUALSCREEN
-        width = user32.GetSystemMetrics(78) # SM_CXVIRTUALSCREEN
-        height = user32.GetSystemMetrics(79)# SM_CYVIRTUALSCREEN
+        left = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+        top = user32.GetSystemMetrics(77)    # SM_YVIRTUALSCREEN
+        width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        height = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
 
         if width <= 0 or height <= 0:
             left = 0
@@ -143,7 +200,6 @@ def capture_win32_gdi() -> Optional[Image.Image]:
             buffer = ctypes.create_string_buffer(buf_size)
             res = gdi32.GetDIBits(hmem_dc, hbitmap, 0, height, buffer, ctypes.byref(bmi), 0)
 
-            # Cleanup GDI handles
             gdi32.SelectObject(hmem_dc, hold_bmp)
             gdi32.DeleteObject(hbitmap)
             gdi32.DeleteDC(hmem_dc)
@@ -187,7 +243,7 @@ def capture_desktop_screenshot() -> Optional[bytes]:
     """Attempts to capture physical desktop screen with blank/transparency validation and compression."""
     ensure_desktop_access()
 
-    # Method 1: PIL ImageGrab (with WinSta0 attachment)
+    # Method 1: PIL ImageGrab
     try:
         from PIL import ImageGrab
         img = None
@@ -209,7 +265,7 @@ def capture_desktop_screenshot() -> Optional[bytes]:
     except Exception as e:
         logger.debug(f"Win32 GDI capture failed or blank: {e}")
 
-    # Method 3: PowerShell CopyFromScreen (with strict ErrorAction and validation)
+    # Method 3: PowerShell CopyFromScreen
     try:
         ps_code = (
             "$ErrorActionPreference = 'Stop'; "
@@ -223,11 +279,13 @@ def capture_desktop_screenshot() -> Optional[bytes]:
             "[System.Convert]::ToBase64String($ms.ToArray()); "
             "$g.Dispose(); $bmp.Dispose(); $ms.Dispose();"
         )
+        creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
         res = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_code],
             capture_output=True,
             text=True,
             timeout=5,
+            creationflags=creationflags,
         )
         if res.returncode == 0 and res.stdout.strip():
             raw_b64 = res.stdout.strip()
@@ -241,21 +299,49 @@ def capture_desktop_screenshot() -> Optional[bytes]:
     return None
 
 
+def _load_terminal_font(size: int = 15) -> Tuple[Any, bool]:
+    """Loads a crisp monospace TrueType font when available, returning (font, is_truetype)."""
+    candidates = [
+        r"C:\Windows\Fonts\CascadiaMono.ttf",
+        r"C:\Windows\Fonts\consola.ttf",
+        r"C:\Windows\Fonts\lucon.ttf",
+        r"C:\Windows\Fonts\cour.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                return ImageFont.truetype(path, size=size), True
+            except Exception:
+                continue
+    return ImageFont.load_default(), False
+
+
 def render_terminal_snapshot(terminal_text: str, title: str = "Antigravity Live Terminal") -> bytes:
     """Renders a dark-mode terminal window snapshot image with macOS/Linux titlebar controls."""
-    lines = [line.rstrip() for line in terminal_text.splitlines() if line.strip()]
-    if not lines:
-        lines = [
+    raw_lines = [line.rstrip() for line in terminal_text.splitlines() if line.strip()]
+    if not raw_lines:
+        raw_lines = [
             "Antigravity Live Terminal Session Active",
             "> Ready for commands...",
             "",
             "(No active stdout logs at this moment)",
         ]
 
-    # Keep last 35 lines to fit cleanly
-    display_lines = lines[-35:]
+    font, is_ttf = _load_terminal_font(size=15)
+    title_font, _ = _load_terminal_font(size=14)
+
+    wrapped_lines = []
+    wrap_width = 96 if is_ttf else 108
+    for line in raw_lines:
+        if not line:
+            wrapped_lines.append("")
+        else:
+            wrapped_lines.extend(textwrap.wrap(line, width=wrap_width, break_long_words=True) or [line])
+
+    display_lines = wrapped_lines[-35:]
     width = 960
-    line_height = 22
+    line_height = 22 if is_ttf else 18
     header_height = 42
     padding = 20
     height = max(320, header_height + len(display_lines) * line_height + padding * 2)
@@ -265,32 +351,41 @@ def render_terminal_snapshot(terminal_text: str, title: str = "Antigravity Live 
 
     # Window titlebar
     draw.rectangle([0, 0, width, header_height], fill=(36, 36, 42))
-    # Window controls (red/yellow/green dots)
     draw.ellipse([16, 15, 28, 27], fill=(255, 95, 86))
     draw.ellipse([36, 15, 48, 27], fill=(255, 189, 46))
     draw.ellipse([56, 15, 68, 27], fill=(39, 201, 63))
 
-    # Title text
-    draw.text((85, 13), f"● {title}", fill=(200, 205, 215))
+    title_prefix = "● " if is_ttf else "* "
+    draw.text((85, 13), f"{title_prefix}{title}", fill=(200, 205, 215), font=title_font)
 
-    # Render terminal output lines with syntax color hints
     y = header_height + padding
     for line in display_lines:
-        line_clean = line[:110]
-        if line_clean.startswith("● Ran:"):
+        line_clean = line
+        if not is_ttf:
+            # Replace symbols unsupported by Pillow's built-in bitmap font
+            line_clean = (
+                line_clean.replace("●", "*")
+                .replace("○", "o")
+                .replace("❌", "[ERR]")
+                .replace("✅", "[OK]")
+                .encode("latin-1", "replace")
+                .decode("latin-1")
+            )
+
+        if line.startswith("● Ran:") or line.startswith("* Ran:"):
             fill_color = (130, 220, 255)
-        elif line_clean.startswith("● Edited:") or line_clean.startswith("● Created:"):
+        elif line.startswith("● Edited:") or line.startswith("● Created:"):
             fill_color = (140, 240, 160)
-        elif line_clean.startswith("○ Thought:"):
+        elif line.startswith("○ Thought:"):
             fill_color = (255, 215, 120)
-        elif line_clean.startswith("❌") or "error" in line_clean.lower():
+        elif line.startswith("❌") or "error" in line.lower():
             fill_color = (255, 120, 120)
-        elif line_clean.startswith(">"):
+        elif line.startswith(">"):
             fill_color = (180, 230, 255)
         else:
             fill_color = (220, 225, 230)
 
-        draw.text((padding, y), line_clean, fill=fill_color)
+        draw.text((padding, y), line_clean, fill=fill_color, font=font)
         y += line_height
 
     buf = io.BytesIO()
@@ -304,7 +399,6 @@ def get_screenshot(fallback_terminal_text: Optional[str] = None, title: str = "A
     if raw_desktop and len(raw_desktop) > 1000:
         return raw_desktop, "🖥️ Desktop Screen Snapshot"
 
-    # Fallback to high-fidelity dark-mode terminal snapshot
     text = fallback_terminal_text or "Antigravity Live Terminal\nStatus: Online / Ready\n"
     rendered = render_terminal_snapshot(text, title=title)
     return rendered, "📺 Terminal Screen Snapshot (Visual Render)"

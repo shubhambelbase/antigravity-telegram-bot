@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 .env
-credntials.txt
+credentials.txt
 credentials.json
 token.json
 .tmp/
@@ -12,3 +12,5 @@ token.json
 *.egg-info/
 dist/
 build/
+*.bat
+logs/

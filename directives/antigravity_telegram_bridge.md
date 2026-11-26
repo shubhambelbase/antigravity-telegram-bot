@@ -29,3 +29,9 @@ Provide a secure, reliable, autonomous Telegram bot interface to control the Goo
 - Single-instance PID file lock prevents duplicate polling conflicts.
 - Rate-limited message editing (min 1.5s interval) prevents Telegram HTTP 429 FloodWait errors.
 - Unhandled exceptions are routed to `global_error_handler` without crashing the daemon.
+
+## Learnings (2026-11-25)
+- `TranscriptWatcher` maintains per-conversation offsets and step cursors (`_conv_states`) so concurrent desktop `agy` sessions do not cause cursor thrashing or turn rewinds.
+- Win32 console injection (`AttachConsole` + `WriteConsoleInputW`) runs in an isolated worker subprocess (`python -m execution.console_injector --worker`) so the daemon never detaches its own console via `FreeConsole()` and `CTRL_C_EVENT` cannot terminate the bot.
+- Headless execution uses `agy -p --output-format stream-json` for structured NDJSON progress/tool events and deterministic `conversation_id` capture, with process-tree cleanup on cancel/timeout.
+- Unclaimed `/claim` setup requires a locally generated 6-digit pairing PIN (`PAIRING_PIN` or `.tmp/pairing_code.txt`) to prevent unauthorized pairing before the owner claims the bot.

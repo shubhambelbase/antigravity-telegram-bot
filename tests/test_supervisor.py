@@ -70,7 +70,8 @@ def test_supervisor_loop_exponential_backoff():
         raise KeyboardInterrupt()
 
     sleep_calls = []
-    with patch.object(telegram_bot, "run_bot", side_effect=mock_run_bot), \
+    with patch.object(telegram_bot, "configure_logging"), \
+         patch.object(telegram_bot, "run_bot", side_effect=mock_run_bot), \
          patch.object(telegram_bot, "check_single_instance", return_value=True), \
          patch.object(telegram_bot, "BOT_TOKEN", "1234:MOCK_TOKEN"), \
          patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):

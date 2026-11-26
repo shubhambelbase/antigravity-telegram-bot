@@ -1,83 +1,45 @@
 # Project Context: Antigravity Telegram Bot
 
 ## Overview
-A lightweight, reliable, autonomous Telegram remote control center for Google Antigravity CLI (`agy`). Features real-time CLI connection detection, normal command execution, interactive prompts (Yes / No / Select / Navigation keys), live hybrid streaming output with 1-second edits, Adaptive Progress System (Indeterminate, Activity-based, and Determinate states), Live PC Sync mute/pause controls (`/sync`, `/mute`), desktop screen snapshotting with WinSta0 desktop attachment, interactive Telegram workspace browser (`/cd`, `/pwd`, `/mkdir`), and full session history / logs inspection.
+Autonomous Telegram remote control center for Google Antigravity CLI (`agy`) on Windows. Supports live desktop terminal keystroke injection (via isolated worker subprocess), `--output-format stream-json` headless execution, bidirectional `transcript.jsonl` mirroring (`/sync`, `/mute`), hybrid 1s terminal streaming with Adaptive Progress Dashboard, interactive keypad (`/controls`), desktop screen capture (`/screenshot`), workspace navigation (`/cd`, `/pwd`, `/mkdir`), and session switching (`/sessions`, `/attach`, `/history`, `/logs`).
 
 ## Stack & Environment
-- **OS**: Windows
-- **Python**: 3.14 (.venv in project root)
-- **Key Libraries**: `python-telegram-bot` (v22+), `python-dotenv`, `psutil`, `pillow` (v13+), `pytest`, `ctypes` (Win32 API)
-- **CLI Binary**: `agy.exe` (`%LOCALAPPDATA%\agy\bin\agy.exe`)
+- **OS**: Windows 10 / 11
+- **Python**: 3.11.9 (`.venv` in project root; `requires-python >= 3.10`)
+- **Key Libraries**: `python-telegram-bot` (v22+), `python-dotenv`, `psutil`, `pillow`, `pytest`, `anyio`, `ctypes` (Win32 API)
+- **CLI Binary**: `agy.exe` (`%LOCALAPPDATA%\agy\bin\agy.exe` or PATH)
 
 ## Architecture & Layout
-- `pyproject.toml` - Standard PEP 517/621 Python package configuration with `antigravity-bot` CLI entrypoint (`execution.telegram_bot:main`).
-- `directives/` - Standard Operating Procedures:
-  - `antigravity_telegram_bridge.md`: Execution rules, timeouts, safety protocols.
-- `execution/` - Core Python package:
-  - `__init__.py`: Package marker and metadata.
-  - `progress_tracker.py`: Adaptive Progress System supporting Mode A (Indeterminate spinner for thinking/planning), Mode B (Activity-based weighted progress: planning 10, exploring 10, editing 30, testing 25, fixing 15, verification 10), and Mode C (Determinate measured progress e.g. 16/20 tests). Ensures non-decreasing monotonicity, 95% cap rules, compact 3-item activity display, and clean tag-stripped bullets.
-  - `console_injector.py`: Win32 `AttachConsole`, `VkKeyScanW`, `MapVirtualKeyW`, and `WriteConsoleInputW` injector typing normal prompts and interactive keys (Yes/No/Select/Arrows/Ctrl+C).
-  - `screenshot.py`: Desktop screen capture utility (WinSta0 / desktop attachment, PIL ImageGrab, Win32 GDI BitBlt) with blank/transparency validation (`is_blank_or_invalid_image`) and high-fidelity dark-mode terminal window snapshot renderer fallback.
-  - `stream_manager.py`: Hybrid Message Editing + Event-Based Streaming manager. Embeds the Adaptive Progress Dashboard into the persistent live terminal message with 500ms debounce buffer, ~1.0s `editMessageText` updates, consecutive line deduplication (`collapse_consecutive_lines`), compact sliding 8-line windowing (`format_terminal_window`), and separate event notifications for completions/errors.
-  - `transcript_watcher.py`: Real-time asynchronous transcript observer tailing `transcript.jsonl` with safe HTML entity escaping, auto-detecting latest sessions, extracting tool calls/thoughts, and pausable live sync mirror (`pause()`/`resume()`).
-  - `autostart.py`: Windows Startup folder shortcut manager (`enable_autostart`, `disable_autostart`, `is_autostart_enabled`) creating shortcuts for windowless background execution via `setup/start_bot_silent.vbs`.
-  - `agy_runner.py`: Subprocess manager wrapping `agy -p` with conversation resumption, session discovery (`get_recent_conversations`), workspace resolution, subdirectory listing, parent tracking, system drive discovery, recent workspaces history, and transcript modification time resolver (`_get_conversation_mtime`) fixing Windows/NTFS folder timestamp inertia.
-  - `telegram_bot.py`: Telegram remote control daemon with whitelist security, persistent Quick-Action Keyboard, interactive prompt keypad, workspace browser (`build_workspace_view`, `/cd`, `/pwd`, `/mkdir`, `ws:*` callback handlers), live sync control (`/sync`, `/mute`, `sync:toggle`), auto-start controls (`/autostart`, `autostart:toggle`), session reuse in `on_pc_user`, `/sessions`, `/history`, `/logs`, `/controls`, `/screenshot`.
-  - `formatter.py`: Converts Markdown output to native Telegram HTML.
-- `setup/` - Automated Windows setup, scripts & guides:
-  - `push_to_github.bat`: Automated GitHub publisher with secret audit, test verification, gh CLI integration, and main branch push.
-  - `run_bot.bat`: Windows single-click launcher with auto-healing installer fallback.
-  - `start_bot_silent.vbs`: Windowless background launcher used by auto-start and startup shortcut.
-  - `enable_autostart.bat` / `disable_autostart.bat`: 1-click Windows auto-start toggle scripts.
-  - `install.bat`: 1-click Windows installer (detects/installs Python via winget if missing, creates `.venv`, installs requirements, runs 47 verification tests, copies `.env.example`, pauses at end).
-  - `setup_guide.md`: Comprehensive step-by-step setup, configuration, interactive keypad, mobile workspace browser, and command reference guide.
-- `tests/` - Unit tests (59 passed):
-  - `test_autostart.py`: Tests Windows Startup folder resolution, shortcut creation, enable/disable operations.
-  - `test_watcher.py`: Tests live transcript change detection, tool call extraction with HTML entity escaping, partial line race condition guards with byte offset rewind, and pause/resume live sync toggle.
-  - `test_progress_tracker.py`: Tests Mode A (indeterminate skeleton loader bar & activity shimmer), Mode B (activity-based), Mode C (determinate), monotonic non-decreasing progress, 95% cap rule, pytest line integration, and markup stripping in activities.
-  - `test_workspace.py`: Tests interactive workspace browser cards, child folder buttons, and system drive selection menus.
-  - `test_screenshot.py`: Tests screenshot capture, WinSta0 attachment, blank/transparent validation, JPEG downscale/compression optimization, and terminal snapshot rendering.
-  - `test_stream_manager.py`: Tests ANSI stripping, compact sliding terminal windowing, consecutive action deduplication/collapsing, 500ms buffer accumulation, ~1.0s periodic edits, completion events, HTML parse error plain-text fallbacks, buffer cap memory protection, animated skeleton terminal preview, header info persistence with skeleton active, and error/cancel events.
-  - `test_runner.py`: Tests runner initialization, relative/absolute workspace switching, folder creation, subdirectory inspection, parent directory retrieval, path traversal prevention, log secret redaction, and session logs export.
-  - `test_formatter.py`: Tests Markdown-to-HTML conversion, Telegram bot token redaction, and API key sanitization.
-  - `test_injector.py`: Tests process detection, session memory map matching (`conversations/<conv_id>.db*`), workspace matching, target PID resolution, alphanumeric/symbol/space key event records, special keys (Yes/No/Select/Arrows/Ctrl+C), scan codes, and injection safety fallback.
-  - `test_supervisor.py`: Tests secret redaction filter in logs/args, single instance PID cleanup, and supervisor retry loop with exponential backoff on network drops.
-- `.tmp/` - Temporary files, recent workspaces ledger (`recent_workspaces.json`), and process run logs.
-- `.env` - Environment secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`).
-- `run.bat` - Root 1-click Windows launcher with auto-healing installer fallback.
+- `pyproject.toml` - PEP 517/621 config with `antigravity-bot` entrypoint (`execution.telegram_bot:main`).
+- `directives/antigravity_telegram_bridge.md` - Operational SOP, safety rules, and learnings.
+- `execution/` - Core package:
+  - `progress_tracker.py`: Mode A (Indeterminate shimmer), Mode B (weighted activity), Mode C (determinate tests) with monotonic progress and 95% cap.
+  - `console_injector.py`: Isolated Win32 `AttachConsole` + `WriteConsoleInputW` worker (`--worker`) keeping parent console intact and shielding `CTRL_C_EVENT`; strict session/workspace PID matching (`presence/*.lock` & `conversations/*.db`).
+  - `screenshot.py`: WinSta0/Desktop capture (with Win32 handle cleanup), PIL `ImageGrab`, GDI `BitBlt`, PowerShell fallback, and TrueType dark-mode terminal snapshot fallback.
+  - `stream_manager.py`: Hybrid streaming with 500ms debounce, ~1s edits, skeleton idle timeout (45s), post-escape 3,900-char Telegram guard, entity-unescaped plain fallback, and retry with backoff.
+  - `transcript_watcher.py`: Async `transcript.jsonl` tailer using per-conversation state (`_conv_states`) to prevent multi-session thrashing/rewinds, offloaded disk I/O, and `mark_conv_caught_up()`.
+  - `autostart.py`: Windows Startup shortcut manager (`setup/start_bot_silent.vbs`) with PowerShell quote escaping.
+  - `agy_runner.py`: Headless `agy -p --output-format stream-json` runner with NDJSON parsing, process-tree termination on cancel/timeout, tail-bounded transcript reads, and `commonpath` traversal guards.
+  - `telegram_bot.py`: Telegram daemon with local 6-digit pairing PIN (`PAIRING_PIN`/`.tmp/pairing_code.txt`), whitelist auth, Win32 single-instance mutex + `.bot.pid`, state persistence (`.tmp/bot_state.json`), async `to_thread` offloading, deferred logging, and supervisor exponential-backoff loop.
+  - `formatter.py`: Markdown-to-Telegram-HTML converter and secret redactor (Telegram tokens, `sk-...`, `gh*`/`github_pat_`, `AIza...`, AWS `AKIA...`, Bearer tokens).
+- `setup/` - `install.bat`, `run_bot.bat`, `start_bot_silent.vbs`, `enable_autostart.bat`, `disable_autostart.bat`, `push_to_github.bat`, `setup_guide.md`.
+- `run.bat` - Root Windows launcher with auto-install and Python-verified PID conflict resolver.
+- `tests/` - 11 test modules (`test_autostart.py`, `test_formatter.py`, `test_injector.py`, `test_progress_tracker.py`, `test_runner.py`, `test_screenshot.py`, `test_stream_manager.py`, `test_supervisor.py`, `test_telegram_bot.py`, `test_watcher.py`, `test_workspace.py`).
+- `.tmp/` - Runtime intermediates (`recent_workspaces.json`, `bot_state.json`, `pairing_code.txt`, `diag.py`).
+- `.env` - Runtime secrets (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`, `DEFAULT_WORKSPACE`, `AGY_PATH`, optional `PAIRING_PIN`, `AGY_MODE`, `AGY_MODEL`, `AGY_SKIP_PERMISSIONS`).
 
-## Quick-Action Bottom Bar Keyboard
-- Row 1: `[ 📊 Status ]` `[ 📜 Sessions ]` `[ 📸 Screenshot ]`
-- Row 2: `[ 📁 PWD ]` `[ 🎮 Controls ]` `[ 🛑 Stop Task ]`
+## Commands & Controls
+- **Quick Bar**: `[ 📊 Status ]` `[ 📜 Sessions ]` `[ 📸 Screenshot ]` / `[ 📁 PWD ]` `[ 🎮 Controls ]` `[ 🛑 Stop Task ]`
+- **Keypad (`key:*`)**: Yes/No/Enter, Up/Down/Space, Select 1–3, Ctrl+C (with busy confirmation), Backspace, Screenshot.
+- **Session & Sync**: `/sessions`, `/attach`, `/history`, `/logs`, `/new`, `/stop`, `/sync`, `/mute`, `/unmute`, `/autostart`.
+- **Workspace**: `/pwd`, `/workspace`, `/cd <path>`, `/mkdir <path>` (hashed callback tokens `ws:sub:<hash>` / `ws:rec:<hash>`).
 
-## Interactive Keypad Controls
-- `[ ✅ Yes (Y) ]` `[ ❌ No (N) ]` `[ ⏎ Enter ]`
-- `[ ⬆️ Up ]` `[ ⬇️ Down ]` `[ ␣ Space ]`
-- `[ 1️⃣ Select 1 ]` `[ 2️⃣ Select 2 ]` `[ 3️⃣ Select 3 ]`
-- `[ 🛑 Ctrl+C ]` `[ ⌫ Backspace ]` `[ 📸 Screenshot ]`
-
-## Live Sync Control
-- `/sync` or `/sync off` or `/mute`: Pauses live PC terminal mirroring (Silent Mode).
-- `/sync on` or `/unmute`: Resumes live PC terminal mirroring.
-- `[ 🔕 Mute Live Sync ]` / `[ 🔔 Enable Live Sync ]`: 1-tap inline toggle in `/status`.
-
-## Workspace Commands & Navigation
-- `[ 📁 PWD ]` or `/pwd` / `/workspace`: Opens interactive folder browser with parent, child folders, drives, and recent workspaces.
-- `/cd <path>` or `cd <path>`: Switches workspace (supports relative `..`, `subfolder`, or absolute `E:\project`).
-- `/mkdir <path>`: Creates a directory and immediately switches workspace into it.
-
-## Auto-Start Control
-- `/autostart` or `/autostart on` / `/autostart off`: Enables or disables background startup on Windows boot.
-- `[ 🚀 Enable Auto-Start ]` / `[ 🛑 Disable Auto-Start ]`: 1-tap inline toggle in `/status`.
-- Double-click `setup\enable_autostart.bat` or `setup\disable_autostart.bat`.
-
-## Security Architecture & Defenses
-- Whitelist Authentication: Only numerical user IDs in `ALLOWED_TELEGRAM_USER_IDS` can execute commands, callbacks, or keystrokes.
-- Path Traversal Guard: Strict `[a-zA-Z0-9_\-]+` validation and `commonpath` checks prevent directory traversal in session IDs and log exports.
-- Automatic Secret Redaction: Telegram bot tokens (`[0-9]{8,12}:[a-zA-Z0-9_-]{34,38}`) and API keys (`sk-...`, `ghp_...`, `AIza...`) are automatically scrubbed from logs and chat outputs.
-- Process Injection Safety: Interactive console targeting strictly matches `agy.exe`/`antigravity.exe` binaries with exact session memory-map / workspace targeting, preventing prompt cross-injection across multiple open terminals.
-- Memory & Buffer Protection: Output stream and buffer caps prevent host memory exhaustion on runaway or infinite loop processes.
+## Security & Reliability Rules
+- **Auth & Pairing**: Unclaimed setup requires a local 6-digit pairing PIN before `/claim <PIN>` writes `ALLOWED_TELEGRAM_USER_IDS` atomically to `.env`.
+- **Injection Safety**: Never hijacks another workspace's or conversation's terminal; runs `AttachConsole` in a subprocess worker.
+- **Test Isolation**: Logging initializes in `main()` (not at import time); `check_single_instance()` skips the global Win32 mutex when `PID_FILE` is patched in tests.
+- **Run Tests**: `.venv\Scripts\python.exe -m pytest -v`
 
 ## Status & Next Steps
-- Status: Production reliability overhaul completed. Implemented supervisor daemon with auto-recovery exponential backoff, HTTPX connection pooling with extended timeouts, Proactor WinError 10054 suppression, rotating file logger (`logs/bot.log`), Win32 `AllowSetForegroundWindow` activation with dynamic pacing, injection watchdog, and session open turn rewind. 59/59 unit tests passing (100% success). Daemon active and polling.
-- Last updated: 2026-11-16.
+- **Status**: Full audit remediation completed (isolated console worker, strict workspace/session targeting, per-conversation `TranscriptWatcher` cursors, `stream-json` headless runner with process-tree kill, 4,096-char streaming/log guards, retry/backoff delivery, Win32 handle cleanup, pairing PIN, state persistence, deferred logging, `to_thread` offloading). `76/76` tests passing. Daemon not running (`python -m execution.telegram_bot` or `run.bat` to start).
+- **Last updated**: 2026-11-25.

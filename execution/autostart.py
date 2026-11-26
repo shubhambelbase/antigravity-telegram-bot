@@ -48,13 +48,18 @@ def enable_autostart(
 
     os.makedirs(os.path.dirname(sc_dest), exist_ok=True)
 
+    # Escape single quotes for PowerShell single-quoted literals
+    ps_dest = sc_dest.replace("'", "''")
+    ps_vbs = target_vbs.replace("'", "''")
+    ps_root = root.replace("'", "''")
+
     # Use PowerShell COM object to create clean .lnk file
     ps_script = (
         f"$WshShell = New-Object -ComObject WScript.Shell; "
-        f"$Shortcut = $WshShell.CreateShortcut('{sc_dest}'); "
+        f"$Shortcut = $WshShell.CreateShortcut('{ps_dest}'); "
         f"$Shortcut.TargetPath = 'wscript.exe'; "
-        f"$Shortcut.Arguments = '\"{target_vbs}\"'; "
-        f"$Shortcut.WorkingDirectory = '{root}'; "
+        f"$Shortcut.Arguments = '\"{ps_vbs}\"'; "
+        f"$Shortcut.WorkingDirectory = '{ps_root}'; "
         f"$Shortcut.WindowStyle = 7; "
         f"$Shortcut.Description = 'Antigravity Telegram Bot Auto-Start Remote Controller'; "
         f"$Shortcut.Save();"

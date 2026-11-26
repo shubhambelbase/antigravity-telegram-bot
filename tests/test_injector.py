@@ -101,3 +101,54 @@ def test_build_char_records_emoji_and_non_bmp():
     # Backward compatibility with _build_char_records
     rec_down, rec_up = _build_char_records("\U0001f517")
     assert ord(rec_down.Event.KeyEvent.UnicodeChar) == 0xD83D
+
+
+def test_find_interactive_agy_pid_prevents_workspace_hijack(monkeypatch, tmp_path):
+    from execution.console_injector import is_agy_process_busy
+
+    ws_a = tmp_path / "proj_a"
+    ws_b = tmp_path / "proj_b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+
+    mock_procs = [
+        {"pid": 1111, "cwd": str(ws_a), "conv_id": "aaaa-1111-2222-3333", "create_time": 100.0},
+    ]
+    monkeypatch.setattr("execution.console_injector.list_interactive_agy_processes", lambda: mock_procs)
+    monkeypatch.setattr("execution.console_injector.get_workspace_for_conversation", lambda cid: str(ws_a))
+
+    # Switching workspace to ws_b must NOT fall back to ws_a terminal!
+    assert find_interactive_agy_pid(workspace=str(ws_b)) is None
+
+    # Requesting a different conv_id whose workspace is ws_a must NOT hijack PID 1111 (which holds aaaa-...)!
+    assert find_interactive_agy_pid(conv_id="bbbb-9999-8888-7777") is None
+
+    assert is_agy_process_busy(pid=99999999) is False
+
+
+def test_is_agy_process_busy_ignores_mcp_servers(monkeypatch):
+    from execution.console_injector import is_agy_process_busy
+
+    class FakeChild:
+        def __init__(self, name, cmdline):
+            self._name = name
+            self._cmdline = cmdline
+
+        def is_running(self):
+            return True
+
+        def name(self):
+            return self._name
+
+        def cmdline(self):
+            return self._cmdline
+
+    class FakeProc:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def children(self, recursive=True):
+            return [FakeChild("python.exe", ["python.exe", "-m", "mcp_server"])]
+
+    monkeypatch.setattr("execution.console_injector.psutil.Process", FakeProc)
+    assert is_agy_process_busy(pid=1234) is False

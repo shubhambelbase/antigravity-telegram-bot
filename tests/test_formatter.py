@@ -34,3 +34,18 @@ def test_sanitize_secrets():
     assert "sk-abcdef1234567890abcdef123456" not in redacted2
     assert "ghp_1234567890abcdefghijklmnopqrstuv" not in redacted2
     assert "[REDACTED_API_KEY]" in redacted2
+
+    # Modern hyphenated OpenAI/Anthropic keys, fine-grained GitHub PATs, AWS keys, Bearer tokens
+    modern = (
+        "OPENAI=sk-proj-abcDEF123456_xyz78901234 "
+        "ANTHROPIC=sk-ant-api03-abcdef123456_789012 "
+        "GH=github_pat_11ABCDE_0123456789abcdef "
+        "AWS=AKIAIOSFODNN7EXAMPLE "
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload"
+    )
+    redacted3 = sanitize_secrets(modern)
+    assert "sk-proj-" not in redacted3
+    assert "sk-ant-" not in redacted3
+    assert "github_pat_" not in redacted3
+    assert "AKIAIOSFODNN7EXAMPLE" not in redacted3
+    assert "eyJhbGci" not in redacted3

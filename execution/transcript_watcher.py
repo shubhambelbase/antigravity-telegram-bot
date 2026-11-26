@@ -10,8 +10,7 @@ import html
 import json
 import logging
 import os
-import re
-from typing import Awaitable, Callable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -33,30 +32,43 @@ def format_tool_call(tc: dict) -> str:
     if not isinstance(args, dict):
         args = {}
 
+    def _pick_path() -> str:
+        for key in ("Path", "TargetFile", "path", "file_path", "AbsolutePath", "DirectoryPath", "SearchDirectory"):
+            val = args.get(key)
+            if val:
+                return str(val).strip("\"'")
+        return ""
+
     if name == "run_command":
-        summary = str(args.get("toolSummary", "")).strip('\"\'')
-        cmd = str(args.get("CommandLine", "")).strip('\"\'')
+        summary = str(args.get("toolSummary", "")).strip("\"'")
+        cmd = str(args.get("CommandLine", "")).strip("\"'")
         label = html.escape(summary or cmd[:50])
         return f"● Ran: <code>{label}</code>"
-    elif name == "edit_file":
-        p = str(args.get("Path", "")).strip('\"\'')
-        fname = html.escape(os.path.basename(p) or p)
+    elif name in ("edit_file", "replace_file_content", "multi_replace_file_content"):
+        p = _pick_path()
+        fname = html.escape(os.path.basename(p) or p or name)
         return f"● Edited: <code>{fname}</code>"
-    elif name == "write_file":
-        p = str(args.get("Path", "")).strip('\"\'')
-        fname = html.escape(os.path.basename(p) or p)
+    elif name in ("write_file", "write_to_file"):
+        p = _pick_path()
+        fname = html.escape(os.path.basename(p) or p or name)
         return f"● Created: <code>{fname}</code>"
-    elif name == "read_file":
-        p = str(args.get("Path", "")).strip('\"\'')
-        fname = html.escape(os.path.basename(p) or p)
+    elif name in ("read_file", "view_file", "view_file_outline", "view_code_item"):
+        p = _pick_path()
+        fname = html.escape(os.path.basename(p) or p or name)
         return f"● Read: <code>{fname}</code>"
+    elif name in ("grep_search", "find_by_name", "list_dir"):
+        q = str(args.get("Query") or args.get("Pattern") or _pick_path() or "").strip("\"'")[:40]
+        return f"● Search: <code>{html.escape(q or name)}</code>"
     elif name == "manage_task":
-        action = html.escape(str(args.get("Action", "")).strip('\"\''))
-        tid = html.escape(str(args.get("TaskId", "")).strip('\"\'').split("/")[-1])
+        action = html.escape(str(args.get("Action", "")).strip("\"'"))
+        tid = html.escape(str(args.get("TaskId", "")).strip("\"'").split("/")[-1])
         return f"● Task: <code>{action} {tid}</code>".strip()
     elif name == "search_web":
-        q = html.escape(str(args.get("query", "")).strip('\"\'')[:40])
+        q = html.escape(str(args.get("query", "")).strip("\"'")[:40])
         return f"● Search: <code>{q}</code>"
+    elif name == "invoke_subagent":
+        role = html.escape(str(args.get("Role") or args.get("TypeName") or "subagent").strip("\"'")[:40])
+        return f"● Subagent: <code>{role}</code>"
     else:
         escaped_name = html.escape(name)
         return f"● Tool: <code>{escaped_name}</code>"
@@ -66,7 +78,6 @@ def format_thinking(thinking_text: str) -> Optional[str]:
     """Formats thinking trace into a concise bullet with safe HTML escaping."""
     if not thinking_text or not thinking_text.strip():
         return None
-    # Pick first non-empty line
     lines = [line.strip() for line in thinking_text.splitlines() if line.strip()]
     if not lines:
         return None
@@ -97,9 +108,36 @@ class TranscriptWatcher:
         self.is_enabled = True
         self._task: Optional[asyncio.Task] = None
         self._current_conv_id: Optional[str] = None
-        self._last_offset = 0
-        self._last_step_index = -1
-        self._current_turn_bullets: List[str] = []
+        # Per-conversation state prevents cursor thrashing and duplicate replays when multiple sessions run
+        self._conv_states: Dict[str, Dict[str, Any]] = {}
+
+    def _get_state(self, conv_id: str) -> Dict[str, Any]:
+        if conv_id not in self._conv_states:
+            self._conv_states[conv_id] = {
+                "offset": 0,
+                "step_index": -1,
+                "bullets": [],
+                "initialized": False,
+            }
+        return self._conv_states[conv_id]
+
+    @property
+    def _last_offset(self) -> int:
+        if self._current_conv_id and self._current_conv_id in self._conv_states:
+            return self._conv_states[self._current_conv_id]["offset"]
+        return 0
+
+    @property
+    def _last_step_index(self) -> int:
+        if self._current_conv_id and self._current_conv_id in self._conv_states:
+            return self._conv_states[self._current_conv_id]["step_index"]
+        return -1
+
+    @property
+    def _current_turn_bullets(self) -> List[str]:
+        if self._current_conv_id and self._current_conv_id in self._conv_states:
+            return self._conv_states[self._current_conv_id]["bullets"]
+        return []
 
     def start(self):
         if not self._running:
@@ -119,75 +157,154 @@ class TranscriptWatcher:
         logger.info("TranscriptWatcher paused (live sync disabled).")
 
     def resume(self):
-        """Resumes live PC sync mirroring, fast-forwarding past backlog."""
+        """Resumes live PC sync mirroring, fast-forwarding past backlog cleanly."""
         self.is_enabled = True
         conv_id = self.get_active_conv_id()
         if conv_id:
+            state = self._get_state(conv_id)
             path = self._get_transcript_path(conv_id)
             if os.path.isfile(path):
-                self._last_offset = os.path.getsize(path)
+                end_offset, highest_step = self._scan_eof_state(path)
+                state["offset"] = end_offset
+                if highest_step > state["step_index"]:
+                    state["step_index"] = highest_step
+            state["bullets"] = []
+            state["initialized"] = True
         logger.info("TranscriptWatcher resumed (live sync enabled).")
 
     def _get_transcript_path(self, conv_id: str) -> str:
         return os.path.join(self.brain_dir, conv_id, ".system_generated", "logs", "transcript.jsonl")
 
     async def switch_to_conv(self, conv_id: str):
-        """Forces immediate re-initialization of tracking for the target conversation ID."""
-        if conv_id and conv_id != self._current_conv_id:
+        """Switches active tracked conversation; initializes cursor only if not previously tracked."""
+        if not conv_id:
+            return
+        self._current_conv_id = conv_id
+        state = self._get_state(conv_id)
+        if not state["initialized"]:
             await self._init_tracking_for_conv(conv_id)
+
+    async def mark_conv_caught_up(self, conv_id: Optional[str]):
+        """Advances cursor to EOF for a conversation after a headless bot turn to prevent duplicate mirroring."""
+        if not conv_id:
+            return
+        state = self._get_state(conv_id)
+        path = self._get_transcript_path(conv_id)
+        if os.path.isfile(path):
+            end_offset, highest_step = await asyncio.to_thread(self._scan_eof_state, path)
+            state["offset"] = end_offset
+            if highest_step > state["step_index"]:
+                state["step_index"] = highest_step
+        state["bullets"] = []
+        state["initialized"] = True
+
+    @staticmethod
+    def _scan_eof_state(path: str) -> Tuple[int, int]:
+        highest_step = -1
+        offset = 0
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        d = json.loads(line)
+                        step = d.get("step_index", -1)
+                        if isinstance(step, int) and step > highest_step:
+                            highest_step = step
+                    except Exception:
+                        pass
+                offset = f.tell()
+        except Exception:
+            try:
+                offset = os.path.getsize(path)
+            except OSError:
+                offset = 0
+        return offset, highest_step
+
+    @staticmethod
+    def _scan_initial_state(path: str) -> Tuple[int, int, Optional[int]]:
+        """Scans transcript on first attach to resume an active turn or start at EOF."""
+        last_user_offset = 0
+        last_user_step = -1
+        has_completed_model = False
+        highest_step = -1
+        eof_offset = 0
+
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            while True:
+                line_offset = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                if not line.strip():
+                    continue
+                try:
+                    d = json.loads(line)
+                    step = d.get("step_index", -1)
+                    if isinstance(step, int) and step > highest_step:
+                        highest_step = step
+                    src = d.get("source")
+                    rec_type = d.get("type")
+                    content = d.get("content")
+                    if src == "USER_EXPLICIT" and rec_type == "USER_INPUT":
+                        last_user_offset = line_offset
+                        last_user_step = step
+                        has_completed_model = False
+                    elif src == "MODEL" and rec_type == "PLANNER_RESPONSE":
+                        if content and content.strip():
+                            has_completed_model = True
+                except Exception:
+                    pass
+            eof_offset = f.tell()
+
+        if last_user_step != -1 and not has_completed_model:
+            return last_user_offset, last_user_step - 1, last_user_step
+        return eof_offset, highest_step, None
+
+    @staticmethod
+    def _read_new_lines(path: str, last_offset: int) -> Tuple[List[str], int]:
+        """Reads newly flushed complete lines from transcript.jsonl without blocking the event loop."""
+        if not os.path.isfile(path):
+            return [], last_offset
+
+        current_size = os.path.getsize(path)
+        if current_size < last_offset:
+            last_offset = 0
+
+        if current_size <= last_offset:
+            return [], last_offset
+
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(last_offset)
+            new_lines = f.readlines()
+            if new_lines and not new_lines[-1].endswith("\n"):
+                incomplete = new_lines.pop()
+                new_offset = f.tell() - len(incomplete.encode("utf-8", errors="replace"))
+            else:
+                new_offset = f.tell()
+        return new_lines, new_offset
 
     async def _init_tracking_for_conv(self, conv_id: str):
         self._current_conv_id = conv_id
+        state = self._get_state(conv_id)
         path = self._get_transcript_path(conv_id)
-        self._last_offset = 0
-        self._last_step_index = -1
-        self._current_turn_bullets = []
+        state["offset"] = 0
+        state["step_index"] = -1
+        state["bullets"] = []
+        state["initialized"] = True
 
         if os.path.isfile(path):
             try:
-                last_user_offset = 0
-                last_user_step = -1
-                has_completed_model = False
-                highest_step = -1
-
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    while True:
-                        line_offset = f.tell()
-                        line = f.readline()
-                        if not line:
-                            break
-                        if not line.strip():
-                            continue
-                        try:
-                            d = json.loads(line)
-                            step = d.get("step_index", -1)
-                            if step > highest_step:
-                                highest_step = step
-                            src = d.get("source")
-                            rec_type = d.get("type")
-                            content = d.get("content")
-                            if src == "USER_EXPLICIT" and rec_type == "USER_INPUT":
-                                last_user_offset = line_offset
-                                last_user_step = step
-                                has_completed_model = False
-                            elif src == "MODEL" and rec_type == "PLANNER_RESPONSE":
-                                if content and content.strip():
-                                    has_completed_model = True
-                        except Exception:
-                            pass
-
-                    # If the latest turn is active (i.e. model hasn't finalized response),
-                    # rewind to the start of that turn so we can stream its live progress!
-                    if last_user_step != -1 and not has_completed_model:
-                        self._last_offset = last_user_offset
-                        self._last_step_index = last_user_step - 1
-                        logger.info(
-                            f"Initialized watcher on active turn in session {conv_id} (rewound to step {last_user_step})"
-                        )
-                    else:
-                        self._last_offset = f.tell()
-                        self._last_step_index = highest_step
-                        logger.info(f"Initialized watcher on idle session {conv_id} at step {self._last_step_index}")
+                offset, step_idx, rewound_step = await asyncio.to_thread(self._scan_initial_state, path)
+                state["offset"] = offset
+                state["step_index"] = step_idx
+                if rewound_step is not None:
+                    logger.info(
+                        f"Initialized watcher on active turn in session {conv_id} (rewound to step {rewound_step})"
+                    )
+                else:
+                    logger.info(f"Initialized watcher on idle session {conv_id} at step {step_idx}")
             except Exception as e:
                 logger.warning(f"Error initializing transcript tracking: {e}")
 
@@ -198,88 +315,80 @@ class TranscriptWatcher:
                     await asyncio.sleep(1.0)
                     continue
 
-                conv_id = self.get_active_conv_id()
+                conv_id = await asyncio.to_thread(self.get_active_conv_id)
                 if not conv_id:
                     await asyncio.sleep(1.0)
                     continue
 
-                if conv_id != self._current_conv_id:
+                state = self._get_state(conv_id)
+                if not state["initialized"]:
                     await self._init_tracking_for_conv(conv_id)
+                else:
+                    self._current_conv_id = conv_id
 
                 path = self._get_transcript_path(conv_id)
                 if not os.path.isfile(path):
                     await asyncio.sleep(1.0)
                     continue
 
-                current_size = os.path.getsize(path)
-                if current_size < self._last_offset:
-                    self._last_offset = 0
-                    self._last_step_index = -1
-                    self._current_turn_bullets = []
+                prev_offset = state["offset"]
+                new_lines, new_offset = await asyncio.to_thread(self._read_new_lines, path, prev_offset)
+                if new_offset < prev_offset:
+                    # File truncated/rotated
+                    state["step_index"] = -1
+                    state["bullets"] = []
+                state["offset"] = new_offset
 
-                if current_size > self._last_offset:
-                    with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        f.seek(self._last_offset)
-                        new_lines = f.readlines()
-                        if new_lines and not new_lines[-1].endswith("\n"):
-                            incomplete = new_lines.pop()
-                            # Rewind offset by the incomplete line's byte length so it will be read completely once flushed
-                            self._last_offset = f.tell() - len(incomplete.encode("utf-8", errors="replace"))
-                        else:
-                            self._last_offset = f.tell()
-
-                    for line in new_lines:
-                        if not line.strip():
+                for line in new_lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                        step_index = record.get("step_index", -1)
+                        if isinstance(step_index, int) and step_index <= state["step_index"]:
                             continue
-                        try:
-                            record = json.loads(line)
-                            step_index = record.get("step_index", -1)
-                            if step_index <= self._last_step_index:
-                                continue
-                            self._last_step_index = step_index
+                        if isinstance(step_index, int):
+                            state["step_index"] = step_index
 
-                            # Skip if headless bot turn
-                            if self.is_bot_running():
-                                continue
+                        # Skip emitting callbacks if headless bot turn owns this execution
+                        if self.is_bot_running():
+                            continue
 
-                            source = record.get("source")
-                            rec_type = record.get("type")
-                            content = record.get("content", "")
+                        source = record.get("source")
+                        rec_type = record.get("type")
+                        content = record.get("content", "")
 
-                            # 1. User Prompt
-                            if source == "USER_EXPLICIT" and rec_type == "USER_INPUT":
-                                self._current_turn_bullets = []
-                                clean_prompt = extract_clean_user_content(content)
-                                if clean_prompt:
-                                    await self.on_user_turn(conv_id, clean_prompt)
+                        if source == "USER_EXPLICIT" and rec_type == "USER_INPUT":
+                            state["bullets"] = []
+                            clean_prompt = extract_clean_user_content(content)
+                            if clean_prompt:
+                                await self.on_user_turn(conv_id, clean_prompt)
 
-                            # 2. Model Thoughts & Tool Calls
-                            elif source == "MODEL" and rec_type == "PLANNER_RESPONSE":
-                                thinking = record.get("thinking", "")
-                                th_bullet = format_thinking(thinking)
-                                if th_bullet:
-                                    self._current_turn_bullets.append(th_bullet)
-                                    if self.on_activity_step:
-                                        await self.on_activity_step(conv_id, th_bullet)
+                        elif source == "MODEL" and rec_type == "PLANNER_RESPONSE":
+                            thinking = record.get("thinking", "")
+                            th_bullet = format_thinking(thinking)
+                            if th_bullet:
+                                state["bullets"].append(th_bullet)
+                                if self.on_activity_step:
+                                    await self.on_activity_step(conv_id, th_bullet)
 
-                                tool_calls = record.get("tool_calls", [])
-                                for tc in tool_calls:
-                                    tc_bullet = format_tool_call(tc)
-                                    self._current_turn_bullets.append(tc_bullet)
-                                    if self.on_activity_step:
-                                        await self.on_activity_step(conv_id, tc_bullet)
+                            tool_calls = record.get("tool_calls", [])
+                            for tc in tool_calls:
+                                tc_bullet = format_tool_call(tc)
+                                state["bullets"].append(tc_bullet)
+                                if self.on_activity_step:
+                                    await self.on_activity_step(conv_id, tc_bullet)
 
-                                # If this planner response contains final user-facing text
-                                if content and content.strip():
-                                    await self.on_model_turn(
-                                        conv_id,
-                                        content.strip(),
-                                        list(self._current_turn_bullets),
-                                    )
-                                    self._current_turn_bullets = []
+                            if content and content.strip():
+                                await self.on_model_turn(
+                                    conv_id,
+                                    content.strip(),
+                                    list(state["bullets"]),
+                                )
+                                state["bullets"] = []
 
-                        except Exception as parse_err:
-                            logger.debug(f"Failed to parse transcript line: {parse_err}")
+                    except Exception as parse_err:
+                        logger.debug(f"Failed to parse transcript line: {parse_err}")
 
             except asyncio.CancelledError:
                 break
