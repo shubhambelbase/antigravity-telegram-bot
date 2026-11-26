@@ -2,40 +2,46 @@
 
 # 🤖 Antigravity Telegram Controller
 
-**Drive, monitor, and interact with the Google Antigravity CLI (`agy`) directly from Telegram.**
+**Control, monitor, and prompt Google Antigravity CLI (`agy`) from anywhere using Telegram — with live terminal mirroring, Win32 keystroke injection, and 1-click session switching.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Platform Windows](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://microsoft.com/windows)
 [![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-2CA5E0.svg?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-*Direct PC screen typing • Live tool execution logs • 1-click session resumption • Human-in-the-loop pairing security*
+*Direct PC terminal keystroke injection • Live transcript & progress streaming • 1-click session resume • Headless fallback*
 
 </div>
+
+---
+
+## Why Use Antigravity Telegram Controller?
+
+Long coding tasks, builds, and test suites shouldn't chain you to your desk. **Antigravity Telegram Controller** bridges your Windows desktop `agy` terminal directly to your Telegram app so you can kick off tasks, answer interactive prompts (`Yes / No / Select`), switch workspaces, and inspect results from your phone — without opening any firewall ports.
+
+- **Works With Your Visible Desktop Terminal:** If `agy` is open on your Windows screen, prompts sent from Telegram are injected directly into that live terminal via Win32 `AttachConsole` + `CONIN$` so you see everything happen in real time when you sit back down.
+- **Automatic Headless Fallback:** Step away with your terminal closed? The controller seamlessly runs `agy` headlessly in your chosen workspace and streams updates back to Telegram.
+- **Zero Port Forwarding & Private Pairing:** Uses outbound Telegram Long Polling plus a one-time 6-digit `/claim <PIN>` lock tied strictly to your Telegram User ID.
 
 ---
 
 ## 📸 How It Works
 
 <p align="center">
-  <img src="docs/screenshots/controller-workflow.png" alt="Antigravity Telegram Controller Workflow" width="100%"/>
+  <img src="docs/screenshots/controller-workflow.png" alt="Antigravity Telegram Controller live workflow between Telegram mobile chat and Windows PowerShell agy terminal" width="100%"/>
 </p>
 
 ---
 
-## 🌟 Highlights
+## 🌟 Key Features
 
-- 📺 **Direct PC Screen Keystroke Injection**: When your Antigravity terminal is open on your desktop, prompts sent from Telegram physically type out on your monitor and run right before your eyes!
-- 🔄 **Bidirectional Real-Time Mirroring**: Anything you type in your PC terminal mirrors to Telegram in real-time. Pausable anytime with `/sync` or `/mute`.
-- 📊 **Adaptive Progress System**: Live real-time progress estimation featuring Indeterminate (thinking/planning spinner), Activity-based (weighted work units: editing, testing, verification), and Determinate (measured test runs, e.g. 16/20 tests = 80%) states with dynamic Unicode progress bar.
-- 📋 **Compact Terminal & Action Deduplication**: Live terminal messages window to a clean 8-line view with folding badges and automatically collapse repetitive actions (e.g. `● Read: file.py (x15)`).
-- 📁 **Mobile Workspace Browser**: Interactive file browser with child directories, parent navigation, system drive picker, and folder creation (`/mkdir`).
-- 🎮 **Hardware Keypad & Screen Capture**: Interactive keypad controls (Yes/No, arrows, Enter, select 1-3, Ctrl+C) and desktop screen snapshots (`/screenshot`).
-- 🚀 **Silent Windows Laptop Auto-Start**: Automatically launches on laptop boot via windowless VBScript and `pythonw.exe` without terminal popups.
-- 🔘 **1-Click Session Switcher**: View past Antigravity conversations with `/sessions` and attach to any session with full history via interactive inline buttons.
-- 🔒 **Biometric / Numerical User ID Security**: Whitelist-based authentication locks the bot strictly to your Telegram account. Unauthorized strangers are instantly blocked.
-- ⚡ **Autonomous & Headless Ready**: If you step away and close your desktop terminal, the bot automatically falls back to headless background execution so you can code from anywhere.
-- 🛡️ **FloodWait Rate-Limit Safe**: Debounced message streaming ensures Telegram API limits (`429 Too Many Requests`) are never breached.
+- **📺 Direct PC Screen Keystroke Injection:** Prompts sent in Telegram type directly into your active desktop Antigravity console (`CONIN$`), while anything you type locally mirrors back to Telegram (`toggleable via /sync`).
+- **📊 Real-Time Adaptive Progress & Streaming:** Watches `transcript.jsonl` in real time, deduplicates noisy repeated tool calls (`● Read: file.py (x15)`), respects Telegram `429` FloodWait limits, and attaches full `.txt` logs if output exceeds 4,096 characters.
+- **🎮 Interactive Hardware Keypad (`/controls`):** Respond to interactive CLI prompts (`Yes`, `No`, `Enter`, `Up/Down`, `Space`, `1/2/3`, `Backspace`, `Ctrl+C`) with single taps.
+- **📁 Visual Mobile Workspace Browser (`/pwd`):** Browse folders, jump between drives (`C:\`, `D:\`, `E:\`), create directories (`/mkdir`), or switch paths (`/cd <path>`).
+- **🔘 1-Click Session Resumption (`/sessions`):** List recent Antigravity conversations and attach to any session with full context.
+- **📸 Desktop & Terminal Capture (`/screenshot`):** Grab an instant physical Windows desktop snapshot whenever you want visual confirmation.
+- **🚀 Silent Windows Boot Auto-Start (`/autostart`):** Runs windowlessly via `pythonw.exe` and `setup/start_bot_silent.vbs` with Win32 single-instance protection.
 
 ---
 
@@ -44,13 +50,13 @@
 ```
             Telegram User (Phone / Desktop)
                            │
-                           ▼  (Long Polling)
+                           ▼  (Outbound Long Polling — zero open ports)
 ┌─────────────────────────────────────────────────────────────┐
 │                 Telegram Controller Daemon                   │
-│  ├── 🛡️ Whitelist Auth Guard (Rejects unauthorized IDs)      │
-│  ├── 🔘 Inline Keyboard Session Manager (/sessions, /attach)│
-│  ├── ⏱️ Rate-Limited Streamer (Debounced edit updates)       │
-│  └── 🔍 Real-Time Transcript Watcher (transcript.jsonl)     │
+│  ├── 🛡️ Whitelist Auth Guard (/claim PIN + User ID lock)     │
+│  ├── 🔘 Inline Session Manager (/sessions, /attach)          │
+│  ├── ⏱️ FloodWait-Safe Streamer (debounced live edits)       │
+│  └── 🔍 Real-Time Transcript Watcher (transcript.jsonl)      │
 └──────────────┬───────────────────────────────┬──────────────┘
                │                               │
        (Active Terminal Open)          (Terminal Closed / Away)
@@ -58,27 +64,23 @@
 ┌───────────────────────────────┐  ┌───────────────────────────┐
 │ Win32 Keystroke Injector      │  │ Headless Runner           │
 │ (AttachConsole + CONIN$)      │  │ (agy -p --continue)       │
-│ Types & runs directly on your │  │ Headless autonomous       │
-│ visible PC terminal screen!   │  │ execution in workspace    │
+│ Types & runs directly on your │  │ Runs autonomously in your │
+│ visible PC terminal screen    │  │ active /pwd workspace     │
 └───────────────────────────────┘  └───────────────────────────┘
 ```
 
 ---
 
-## 🚀 Quickstart (3 Minutes)
+## 🚀 Quickstart (PowerShell)
 
 ### 1. Prerequisites
 - **Windows 10 / 11 (64-bit)**
-- **Python 3.10+** (Ensure *"Add to PATH"* is checked during installation)
-- **Google Antigravity CLI (`agy`)** installed and authenticated
+- **Python 3.10+** (`python --version`)
+- **Google Antigravity CLI (`agy`)** installed and authenticated (`agy --help`)
+- A **Telegram Bot Token** from **`@BotFather`**
 
-### 2. Get a Bot Token
-1. Open Telegram and search for **`@BotFather`**.
-2. Send `/newbot`, choose a name and username.
-3. Copy the HTTP API Token provided.
-
-### 3. Install
-Clone the repository, create a virtual environment, and install dependencies in **PowerShell**:
+### 2. Clone & Install
+Open **PowerShell** and run:
 ```powershell
 git clone https://github.com/shubhambelbase/antigravity-telegram-bot.git
 cd antigravity-telegram-bot
@@ -89,20 +91,19 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-### 4. Configure & Launch
-1. Open `.env` and paste your bot token:
+### 3. Configure & Launch
+1. Open `.env` (`notepad .env`) and paste your bot token:
    ```env
    TELEGRAM_BOT_TOKEN=your_token_here
    ```
-2. Start the bot from PowerShell:
+2. Launch the controller:
    ```powershell
    .\.venv\Scripts\python.exe -m execution.telegram_bot
    ```
-   *(Or run silently in the background via `wscript.exe .\setup\start_bot_silent.vbs`).*
-3. In Telegram, open your bot, send **`/start`**, check your local console / `logs/bot.log` / `.tmp/pairing_code.txt` for the 6-digit pairing PIN, and send `/claim <PIN>`.
-4. You are ready! Send any coding prompt or command.
+   *(Or launch silently without a terminal window: `wscript.exe .\setup\start_bot_silent.vbs`)*
+3. Open your bot in Telegram, send **`/start`**, grab the 6-digit pairing PIN from your console / `logs/bot.log` / `.tmp/pairing_code.txt`, and send **`/claim <PIN>`**.
 
-For full setup documentation, see [setup/setup_guide.md](setup/setup_guide.md).
+For full documentation, see [setup/setup_guide.md](setup/setup_guide.md).
 
 ---
 
@@ -110,34 +111,33 @@ For full setup documentation, see [setup/setup_guide.md](setup/setup_guide.md).
 
 | Command | Description |
 | :--- | :--- |
-| **`<any prompt>`** | Sends a task to Antigravity (types on your desktop terminal or runs headlessly). |
-| **`/sessions`** | Lists recent conversations with 1-click interactive inline buttons. |
-| **`/attach <1-5 or ID>`** | Attaches to any past conversation session with full history and context. |
-| **`/status`** | Displays active session ID, desktop terminal connection, host CPU & RAM, and sync/autostart toggles. |
-| **`/pwd` or `/workspace`** | Opens interactive folder browser with subfolders and system drives. |
-| **`/cd <path>`** | Switches active workspace directory on your machine. |
-| **`/mkdir <path>`** | Creates a directory and immediately switches workspace into it. |
-| **`/controls`** | Opens interactive hardware keypad (Yes/No, arrows, Enter, select 1-3, Ctrl+C). |
-| **`/screenshot`** | Captures and sends a desktop screenshot. |
-| **`/sync`** | Toggles live PC terminal mirroring on/off (Silent Mode). |
-| **`/autostart`** | Toggles silent auto-start on Windows laptop boot. |
+| **`<any prompt>`** | Sends a coding task to Antigravity (injects into desktop terminal or runs headlessly). |
+| **`/sessions`** | Lists recent conversations with 1-click attach buttons. |
+| **`/attach <1-5 or ID>`** | Attaches to a previous conversation session with full history. |
+| **`/status`** | Displays active session ID, terminal status, host CPU/RAM, and sync/autostart toggles. |
+| **`/pwd` or `/workspace`** | Opens the interactive visual folder & drive browser. |
+| **`/cd <path>`** | Changes the active workspace directory. |
+| **`/mkdir <path>`** | Creates a new folder and switches into it. |
+| **`/controls`** | Opens the interactive hardware keypad (`Yes/No`, arrows, `Enter`, `1-3`, `Ctrl+C`). |
+| **`/screenshot`** | Captures and sends a live Windows desktop screenshot. |
+| **`/sync`** | Toggles live PC terminal mirroring on/off. |
+| **`/autostart`** | Toggles silent auto-start on Windows boot. |
 | **`/new`** | Starts a clean conversation turn. |
-| **`/stop` or `/cancel`** | Immediately terminates the currently executing agent turn. |
+| **`/stop` or `/cancel`** | Immediately stops the running agent turn. |
 
 ---
 
 ## 🔒 Security Model
 
-- **Zero Hardcoded Secrets**: All tokens and IDs are stored in `.env` (gitignored).
-- **Hard Whitelist**: Only the Telegram User ID you authorize during `/claim` can send instructions.
-- **Outbound Long Polling**: The bot does not open incoming ports on your router or computer, eliminating external attack vectors.
-- **Single-Instance Lock**: Protected by a PID lock file (`.bot.pid`) to prevent conflicting polling loops.
+- **Zero Hardcoded Secrets:** Tokens and user IDs live only in `.env` (gitignored), with automatic log secret redaction.
+- **Hard Whitelist:** Only the Telegram User ID verified during `/claim` can interact with the bot.
+- **No Inbound Ports:** Uses outbound Telegram Long Polling (`getUpdates`), avoiding external port exposure.
+- **Single-Instance Lock:** Protected by `.bot.pid` and Win32 mutex checks to prevent duplicate polling loops.
 
 ---
 
 ## 🧪 Testing
 
-Run the full automated test suite anytime:
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/ -v
 ```
@@ -146,10 +146,13 @@ Run the full automated test suite anytime:
 
 ## ⚙️ Silent Windows Auto-Start
 
-Send **`/autostart`** inside Telegram (or run `.\.venv\Scripts\python.exe -c "from execution.autostart import enable_autostart; enable_autostart()"` in PowerShell) to launch silently on boot via `pythonw.exe`.
+Send **`/autostart`** inside Telegram, or enable it from **PowerShell**:
+```powershell
+.\.venv\Scripts\python.exe -c "from execution.autostart import enable_autostart; enable_autostart()"
+```
 
 ---
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Licensed under the MIT License — see [LICENSE](LICENSE).
